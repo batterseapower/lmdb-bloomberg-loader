@@ -1,4 +1,4 @@
-package com.company;
+package uk.co.omegaprime;
 
 import au.com.bytecode.opencsv.CSVReader;
 import org.fusesource.lmdbjni.Constants;
@@ -55,36 +55,67 @@ public class Loader {
         return Stream.of(directory.listFiles()).filter((File f) -> FILENAME_REGEX.matcher(f.getName()).matches()).iterator();
     }
 
-    private static class Database implements AutoCloseable {
+    static class DatabaseOptions {
+        int createPermissions = 0644;
+        long mapSizeBytes = 10_485_760;
+        long maxIndexes   = 1;
+        long maxReaders   = 126;
+        int flags         = 0; // JNI.MDB_WRITEMAP;
+
+        public DatabaseOptions createPermissions(int perms) { this.createPermissions = perms; return this; }
+        public DatabaseOptions mapSize(long bytes)          { this.mapSizeBytes = bytes; return this; }
+        public DatabaseOptions maxIndexes(long indexes)     { this.maxIndexes = indexes; return this; }
+        public DatabaseOptions maxReaders(long readers)     { this.maxReaders = readers; return this; }
+
+        private DatabaseOptions flag(int flag, boolean set) { this.flags = set ? flags | flag : flags & ~flag; return this; }
+        public DatabaseOptions writeMap(boolean set)       { return flag(JNI.MDB_WRITEMAP,   set); }
+        public DatabaseOptions noSubDirectory(boolean set) { return flag(JNI.MDB_NOSUBDIR,   set); }
+        public DatabaseOptions readOnly(boolean set)       { return flag(JNI.MDB_RDONLY,     set); }
+        public DatabaseOptions noTLS(boolean set)          { return flag(JNI.MDB_NOTLS,      set); }
+    }
+
+    static class Database implements AutoCloseable {
         final long env;
 
         public Database(File file) {
+            this(file, new DatabaseOptions());
+        }
+
+        public Database(File file, DatabaseOptions options) {
             final long[] envPtr = new long[1];
             Util.checkErrorCode(JNI.mdb_env_create(envPtr));
             env = envPtr[0];
 
-            // FIXME: make configurable
-            Util.checkErrorCode(JNI.mdb_env_set_maxdbs(env, 20));
-            Util.checkErrorCode(JNI.mdb_env_set_mapsize(env, 1_000_000_000));
+            Util.checkErrorCode(JNI.mdb_env_set_maxdbs    (env, options.maxIndexes));
+            Util.checkErrorCode(JNI.mdb_env_set_mapsize   (env, options.mapSizeBytes));
+            Util.checkErrorCode(JNI.mdb_env_set_maxreaders(env, options.maxReaders));
 
-            Util.checkErrorCode(JNI.mdb_env_open(env, file.getAbsolutePath(), 0, 0644));
+            Util.checkErrorCode(JNI.mdb_env_open(env, file.getAbsolutePath(), options.flags, options.createPermissions));
         }
 
+        public void setMetaSync(boolean enabled) { Util.checkErrorCode(JNI.mdb_env_set_flags(env, JNI.MDB_NOMETASYNC, enabled ? 0 : 1)); }
+        public void setSync    (boolean enabled) { Util.checkErrorCode(JNI.mdb_env_set_flags(env, JNI.MDB_NOSYNC, enabled ? 0 : 1)); }
+        public void setMapSync (boolean enabled) { Util.checkErrorCode(JNI.mdb_env_set_flags(env, JNI.MDB_MAPASYNC, enabled ? 0 : 1)); }
+
+        public void sync(boolean force) { Util.checkErrorCode(JNI.mdb_env_sync(env, force ? 1 : 0)); }
+
+        public <K, V> Index<K, V> index(Transaction tx, String name, Schema<K> kSchema, Schema<V> vSchema) {
+            return index(tx, name, kSchema, vSchema, false);
+        }
         public <K, V> Index<K, V> createIndex(Transaction tx, String name, Schema<K> kSchema, Schema<V> vSchema) {
-            final long[] dbiPtr = new long[1];
-            Util.checkErrorCode(JNI.mdb_dbi_open(tx.txn, name, JNI.MDB_CREATE, dbiPtr));
-            return new Index<K, V>(this, dbiPtr[0], kSchema, vSchema);
+            return index(tx, name, kSchema, vSchema, true);
         }
 
-        public <K, V> Index<K, V> openIndex(String name, Schema<K> kSchema, Schema<V> vSchema) {
+        public <K, V> Index<K, V> index(Transaction tx, String name, Schema<K> kSchema, Schema<V> vSchema, boolean allowCreation) {
             final long[] dbiPtr = new long[1];
-            try (Transaction tx = transaction(true)) {
-                Util.checkErrorCode(JNI.mdb_dbi_open(tx.txn, name, 0, dbiPtr));
-            }
-
-            return new Index<K, V>(this, dbiPtr[0], kSchema, vSchema);
+            Util.checkErrorCode(JNI.mdb_dbi_open(tx.txn, name, allowCreation ? JNI.MDB_CREATE : 0, dbiPtr));
+            return new Index<>(this, dbiPtr[0], kSchema, vSchema);
         }
 
+        // Quoth the docs:
+        //   A transaction and its cursors must only be used by a single
+	    //   thread, and a thread may only have a single transaction at a time.
+	    //   If #MDB_NOTLS is in use, this does not apply to read-only transactions.
         public Transaction transaction(boolean isReadOnly) {
             final long[] txnPtr = new long[1];
             Util.checkErrorCode(JNI.mdb_txn_begin(env, 0, isReadOnly ? JNI.MDB_RDONLY : 0, txnPtr));
@@ -96,23 +127,29 @@ public class Loader {
         }
     }
 
-    private static class Transaction implements AutoCloseable {
+    static class Transaction implements AutoCloseable {
         final long txn;
+        boolean handleFreed = false;
 
         Transaction(long txn) {
             this.txn = txn;
         }
 
         public void abort() {
+            handleFreed = true;
             JNI.mdb_txn_abort(txn);
         }
 
         public void commit() {
+            handleFreed = true;
             Util.checkErrorCode(JNI.mdb_txn_commit(txn));
         }
 
         public void close() {
-            abort();
+            if (!handleFreed) {
+                // Get a very scary JVM crash if we call this after already calling commit()
+                abort();
+            }
         }
     }
 
@@ -368,7 +405,7 @@ public class Loader {
         return buffer;
     }
 
-    private static class Index<K, V> implements AutoCloseable {
+    static class Index<K, V> implements AutoCloseable {
         final Database db;
         final long dbi;
         final Schema<K> kSchema;
@@ -401,6 +438,12 @@ public class Loader {
             }
         }
 
+        private static void freeSharedBufferPointer(long bufferPtr) {
+            if (bufferPtr != 0) {
+                unsafe.freeMemory(bufferPtr);
+            }
+        }
+
         private static <T> void fillBufferPointerSizeFromSchema(Schema<T> schema, long bufferPtr, int sz) {
             if (schema.fixedSize() < 0) {
                 unsafe.putAddress(bufferPtr, sz);
@@ -417,7 +460,7 @@ public class Loader {
             if (bufferPtr != 0) {
                 return bufferPtr;
             } else {
-                long bufferPtrNow = unsafe.allocateMemory(2 * Unsafe.ADDRESS_SIZE + sz);
+                final long bufferPtrNow = unsafe.allocateMemory(2 * Unsafe.ADDRESS_SIZE + sz);
                 unsafe.putAddress(bufferPtrNow + Unsafe.ADDRESS_SIZE, bufferPtrNow + 2 * Unsafe.ADDRESS_SIZE);
                 return bufferPtrNow;
             }
@@ -436,6 +479,8 @@ public class Loader {
         }
 
         public void close() {
+            freeSharedBufferPointer(kBufferPtr);
+            freeSharedBufferPointer(vBufferPtr);
             JNI.mdb_dbi_close(db.env, dbi);
         }
 
@@ -474,6 +519,26 @@ public class Loader {
             }
         }
 
+        public V get(Transaction tx, K k) {
+            final int kSz = kSchema.size(k);
+
+            final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
+            fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, 0);
+            try {
+                int rc = JNI.mdb_get_raw(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow);
+                if (rc == JNI.MDB_NOTFOUND) {
+                    return null;
+                } else {
+                    Util.checkErrorCode(rc);
+                    return vSchema.read(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(vBufferPtrNow));
+                }
+            } finally {
+                freeBufferPointer(vBufferPtr, vBufferPtrNow);
+                freeBufferPointer(kBufferPtr, kBufferPtrNow);
+            }
+        }
+
         public boolean contains(Transaction tx, K k) {
             final int kSz = kSchema.size(k);
 
@@ -489,12 +554,12 @@ public class Loader {
                     return true;
                 }
             } finally {
+                freeBufferPointer(vBufferPtr, vBufferPtrNow);
                 freeBufferPointer(kBufferPtr, kBufferPtrNow);
             }
         }
 
-        public Iterator<Pair<K, V>> keyValues() {
-            final Transaction tx = db.transaction(true);
+        public Iterator<Pair<K, V>> keyValues(Transaction tx) {
             final Cursor<K, V> cursor = createCursor(tx);
             boolean initialAtEnd = cursor.moveFirst();
             return new Iterator<Pair<K, V>>() {
@@ -512,7 +577,6 @@ public class Loader {
                     atEnd = cursor.moveNext();
                     if (atEnd) {
                         cursor.close();
-                        tx.abort();
                     }
                     return pair;
                 }
@@ -531,7 +595,7 @@ public class Loader {
     }
 
     // TODO: duplicate item support
-    private static class Cursor<K, V> {
+    static class Cursor<K, V> {
         final Index<K, V> index;
         final long cursor;
 
@@ -583,7 +647,7 @@ public class Loader {
             } finally {
                 // Need to copy the MDB_val from the temp structure to the permanent one, in case someone does getKey() now (they should get back k)
                 unsafe.putAddress(bufferPtr,                       unsafe.getAddress(kBufferPtrNow));
-                unsafe.putAddress(bufferPtr + Unsafe.ADDRESS_SIZE, unsafe.getAddress(kBufferPtrNow) + Unsafe.ADDRESS_SIZE);
+                unsafe.putAddress(bufferPtr + Unsafe.ADDRESS_SIZE, unsafe.getAddress(kBufferPtrNow + Unsafe.ADDRESS_SIZE));
                 bufferPtrStale = false;
                 Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
             }
@@ -678,11 +742,31 @@ public class Loader {
         }
         dbDirectory.mkdir();
 
-        try (final Database db = new Database(dbDirectory)) {
+
+
+        try (final Database db = new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1_073_741_824))) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<Integer, String> index = db.createIndex(tx, "Test", IntegerSchema.INSTANCE, StringSchema.INSTANCE);
+
+                index.put(tx, 1, "Hello");
+                index.put(tx, 2, "World");
+                index.put(tx, 3, "!");
+
+                String got = index.get(tx, 2);
+                if (!"World".equals(got)) {
+                    throw new IllegalStateException("WTF? '" + got + "'");
+                }
+
+                tx.commit();
+            }
+        }
+
+        System.exit(1);
+
+        try (final Database db = new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1_073_741_824))) {
             try (final Transaction tx = db.transaction(false)) {
                 final Index<File, Source> sourcesIndex = db.<File, Source>createIndex(tx, "Sources", StringSchema.INSTANCE.map(File::getAbsolutePath, File::new),
-                        InstantSchema.INSTANCE_SECOND_RESOLUTION.map(Source::getInstant, Source::new));
-                //final Set<String> alreadyLoaded = .keyValues(VoidSchema.INSTANCE, SourceSchema.INSTANCE).map((Source source) -> source.getFilename()).toSet();
+                                                                                                     InstantSchema.INSTANCE_SECOND_RESOLUTION.map(Source::getInstant, Source::new));
                 final Iterator<File> it = availableFiles(new File("/Users/mbolingbroke/Downloads"));
                 while (it.hasNext()) {
                     final File file = it.next();
@@ -694,6 +778,7 @@ public class Loader {
 
                 tx.commit();
             }
+            db.sync(true);
         }
     }
 
