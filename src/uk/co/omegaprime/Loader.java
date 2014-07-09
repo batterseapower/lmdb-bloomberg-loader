@@ -60,7 +60,7 @@ public class Loader {
         long mapSizeBytes = 10_485_760;
         long maxIndexes   = 1;
         long maxReaders   = 126;
-        int flags         = 0; // JNI.MDB_WRITEMAP;
+        int flags         = JNI.MDB_WRITEMAP;
 
         public DatabaseOptions createPermissions(int perms) { this.createPermissions = perms; return this; }
         public DatabaseOptions mapSize(long bytes)          { this.mapSizeBytes = bytes; return this; }
@@ -757,7 +757,6 @@ public class Loader {
 
                 tx.commit();
             }
-            db.sync(true);
         }
     }
 
@@ -830,19 +829,16 @@ public class Loader {
                     for (int i = 0; i < headers.length; i++) {
                         if (i == idBBGlobalIx) continue;
 
-                        //final Index<FieldKey, String> index = indexes[i];
                         final Cursor<FieldKey, String> cursor = cursors[i];
                         final String value = line[i].trim();
 
                         items++;
 
                         if (value.length() == 0) {
-                            //index.remove(tx, key);
                             if (cursor.moveTo(key)) {
                                 cursor.delete();
                             }
                         } else {
-                            //index.put(tx, key, value);
                             cursor.put(key, value);
                         }
                     }
