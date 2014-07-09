@@ -283,7 +283,7 @@ public class Loader {
         public String read(long ptr, int sz) {
             final char[] cs = new char[sz];
             for (int i = 0; i < cs.length; i++) {
-                cs[i] = (char)unsafe.getByte(ptr + sz);
+                cs[i] = (char)unsafe.getByte(ptr + i);
             }
             return new String(cs);
         }
@@ -311,7 +311,7 @@ public class Loader {
 
             for (int i = 0; i < x.length(); i++) {
                 final char c = x.charAt(i);
-                unsafe.putByte(ptr + i, (byte)((int)c > 255 ? c : '?'));
+                unsafe.putByte(ptr + i, (byte)((int)c < 255 ? c : '?'));
             }
         }
 
@@ -741,27 +741,6 @@ public class Loader {
             dbDirectory.delete();
         }
         dbDirectory.mkdir();
-
-
-
-        try (final Database db = new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1_073_741_824))) {
-            try (final Transaction tx = db.transaction(false)) {
-                final Index<Integer, String> index = db.createIndex(tx, "Test", IntegerSchema.INSTANCE, StringSchema.INSTANCE);
-
-                index.put(tx, 1, "Hello");
-                index.put(tx, 2, "World");
-                index.put(tx, 3, "!");
-
-                String got = index.get(tx, 2);
-                if (!"World".equals(got)) {
-                    throw new IllegalStateException("WTF? '" + got + "'");
-                }
-
-                tx.commit();
-            }
-        }
-
-        System.exit(1);
 
         try (final Database db = new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1_073_741_824))) {
             try (final Transaction tx = db.transaction(false)) {

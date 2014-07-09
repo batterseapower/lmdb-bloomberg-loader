@@ -131,4 +131,20 @@ public class LoaderTest {
             }
         }
     }
+
+    @Test
+    public void boundedSizeKeyValues() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<String, String> index = db.createIndex(tx, "Test", new Latin1StringSchema(10), new Latin1StringSchema(10));
+
+                index.put(tx, "Hello", "World");
+                index.put(tx, "Goodbye", "Hades");
+
+                assertEquals("World", index.get(tx, "Hello"));
+
+                tx.commit();
+            }
+        }
+    }
 }
