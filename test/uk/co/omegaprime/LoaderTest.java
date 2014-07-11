@@ -63,6 +63,9 @@ public class LoaderTest {
 
                     assertTrue(cursor.moveNext());
                     assertEquals("Not a number", cursor.getValue());
+
+                    assertTrue(cursor.moveFloor(Float.NaN));
+                    assertEquals("Not a number", cursor.getValue());
                 }
 
                 tx.commit();
