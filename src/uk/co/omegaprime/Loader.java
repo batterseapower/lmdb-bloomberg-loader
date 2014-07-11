@@ -739,7 +739,32 @@ public class Loader {
         public boolean moveCeiling(K k) { return move(k, JNI.MDB_SET_RANGE); }
 
         public boolean moveFloor(K k) {
-            return (moveCeiling(k) && getKey().equals(k)) || movePrevious();
+            return (moveCeiling(k) && keyEquals(k)) || movePrevious();
+        }
+
+        private boolean keyEquals(K k) {
+            if (bufferPtrStale) { refresh(); }
+
+            final int kSz = index.kSchema.size(k);
+            if (kSz != unsafe.getAddress(bufferPtr)) {
+                return false;
+            }
+
+            final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
+            Index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            try {
+                final long ourKeyPtr   = unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE);
+                final long theirKeyPtr = kBufferPtrNow + 2 * Unsafe.ADDRESS_SIZE;
+                for (int i = 0; i < kSz; i++) {
+                    if (unsafe.getByte(ourKeyPtr + i) != unsafe.getByte(theirKeyPtr + i)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            } finally {
+                Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
+            }
         }
 
         public K getKey() {
