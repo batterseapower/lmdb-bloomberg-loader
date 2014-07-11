@@ -153,39 +153,25 @@ public class Loader {
     }
 
     interface Schema<T> {
-        static <T> T readFramed(Schema<T> schema, long ptr, int[] sizeOut) {
-            if (schema.fixedSize() >= 0) {
-                sizeOut[0] = schema.fixedSize();
-                return schema.read(ptr, schema.fixedSize());
-            } else {
-                int sz = unsafe.getInt(ptr);
-                sizeOut[0] = Integer.BYTES + sz;
-                return schema.read(ptr + Integer.BYTES, sz);
-            }
-        }
-
-        static <T> int writeFramed(Schema<T> schema, long ptr, T x) {
-            if (schema.fixedSize() >= 0) {
-                schema.write(ptr, schema.fixedSize(), x);
-                return schema.fixedSize();
-            } else {
-                final int sz = schema.size(x);
-                unsafe.putInt(ptr, sz);
-                schema.write(ptr + Integer.BYTES, sz, x);
-                return Integer.BYTES + sz;
-            }
-        }
-
         // FIXME: lexicographic ordering
-        // FIXME: could infer length from the fact that the 2nd thing is fixed length
         public static <T, U, V> Schema<V> zipWith(Schema<T> leftSchema, Function<V, T> leftProj, Schema<U> rightSchema, Function<V, U> rightProj, BiFunction<T, U, V> f) {
             return new Schema<V>() {
                 @Override
                 public V read(long ptr, int sz) {
-                    int[] sizeOut = new int[] { 0 };
-                    final T left = readFramed(leftSchema, ptr, sizeOut);
-                    ptr += sizeOut[0];
-                    final U right = rightSchema.read(ptr, sz - sizeOut[0]);
+                    final int leftSz;
+                    final int overhead;
+                    if (leftSchema.fixedSize() >= 0) {
+                        leftSz = leftSchema.fixedSize();
+                        overhead = 0;
+                    } else if (rightSchema.fixedSize() >= 0) {
+                        leftSz = sz - rightSchema.fixedSize();
+                        overhead = 0;
+                    } else {
+                        leftSz = unsafe.getInt(ptr);
+                        overhead = Integer.BYTES;
+                    }
+                    final T left  = leftSchema .read(ptr + overhead, leftSz);
+                    final U right = rightSchema.read(ptr + overhead, sz - leftSz - overhead);
                     return f.apply(left, right);
                 }
 
@@ -201,7 +187,8 @@ public class Loader {
                 @Override
                 public int maximumSize() {
                     if (leftSchema.maximumSize() >= 0 && rightSchema.maximumSize() >= 0) {
-                        return (leftSchema.fixedSize() >= 0 ? 0 : Integer.BYTES) + leftSchema.maximumSize() + rightSchema.maximumSize();
+                        return (leftSchema.fixedSize() >= 0 || rightSchema.fixedSize() >= 0 ? 0 : Integer.BYTES) +
+                               leftSchema.maximumSize() + rightSchema.maximumSize();
                     } else {
                         return -1;
                     }
@@ -209,13 +196,29 @@ public class Loader {
 
                 @Override
                 public int size(V x) {
-                    return (leftSchema.fixedSize() >= 0 ? 0 : Integer.BYTES) + leftSchema.size(leftProj.apply(x)) + rightSchema.size(rightProj.apply(x));
+                    return (leftSchema.fixedSize() >= 0 || rightSchema.fixedSize() >= 0 ? 0 : Integer.BYTES) +
+                           leftSchema.size(leftProj.apply(x)) + rightSchema.size(rightProj.apply(x));
                 }
 
                 @Override
                 public void write(long ptr, int sz, V x) {
-                    final int leftSize  = writeFramed(leftSchema, ptr, leftProj.apply(x));
-                    rightSchema.write(ptr + leftSize, sz - leftSize, rightProj.apply(x));
+                    final T left = leftProj.apply(x);
+
+                    final int leftSz;
+                    final int overhead;
+                    if (leftSchema.fixedSize() >= 0) {
+                        leftSz = leftSchema.fixedSize();
+                        overhead = 0;
+                    } else if (rightSchema.fixedSize() >= 0) {
+                        leftSz = sz - rightSchema.fixedSize();
+                        overhead = 0;
+                    } else {
+                        leftSz = leftSchema.size(left);
+                        unsafe.putInt(ptr, leftSz);
+                        overhead = Integer.BYTES;
+                    }
+                    leftSchema .write(ptr + overhead, leftSz, left);
+                    rightSchema.write(ptr + overhead + leftSz, sz - leftSz - overhead, rightProj.apply(x));
                 }
             };
         }
