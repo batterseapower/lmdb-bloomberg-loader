@@ -170,8 +170,8 @@ public class Loader {
                         leftSz = unsafe.getInt(ptr);
                         overhead = Integer.BYTES;
                     }
-                    final T left  = leftSchema .read(ptr + overhead, leftSz);
-                    final U right = rightSchema.read(ptr + overhead, sz - leftSz - overhead);
+                    final T left  = leftSchema .read(ptr + overhead,          leftSz);
+                    final U right = rightSchema.read(ptr + overhead + leftSz, sz - leftSz - overhead);
                     return f.apply(left, right);
                 }
 
@@ -217,7 +217,7 @@ public class Loader {
                         unsafe.putInt(ptr, leftSz);
                         overhead = Integer.BYTES;
                     }
-                    leftSchema .write(ptr + overhead, leftSz, left);
+                    leftSchema .write(ptr + overhead,          leftSz,                 left);
                     rightSchema.write(ptr + overhead + leftSz, sz - leftSz - overhead, rightProj.apply(x));
                 }
             };
