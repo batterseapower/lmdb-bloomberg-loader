@@ -3,8 +3,11 @@ package uk.co.omegaprime;
 import org.junit.Test;
 
 import java.io.File;
+import java.time.LocalDate;
+import java.util.*;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static uk.co.omegaprime.Loader.*;
 
@@ -25,6 +28,161 @@ public class LoaderTest {
 
     private Database openDatabase() {
         return new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1_073_741_824));
+    }
+
+    @Test
+    public void canStoreFloats() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<Float, String> index = db.createIndex(tx, "Test", FloatSchema.INSTANCE, StringSchema.INSTANCE);
+
+                index.put(tx, 1.0f, "One");
+                index.put(tx, 1234567890123.0f, "Biggish");
+                index.put(tx, Float.NaN, "Not a number");
+                index.put(tx, Float.POSITIVE_INFINITY, "Infinity");
+
+                assertEquals("One", index.get(tx, 1.0f));
+                assertEquals("Biggish", index.get(tx, 1234567890123.0f));
+                assertEquals("Not a number", index.get(tx, Float.NaN));
+                assertEquals("Infinity", index.get(tx, Float.POSITIVE_INFINITY));
+
+                try (Cursor<Float, String> cursor = index.createCursor(tx)) {
+                    assertTrue(cursor.moveCeiling(0.5f));
+                    assertEquals("One", cursor.getValue());
+
+                    assertFalse(cursor.movePrevious());
+
+                    assertTrue(cursor.moveCeiling(100f));
+                    assertEquals("Biggish", cursor.getValue());
+
+                    assertTrue(cursor.movePrevious());
+                    assertEquals("One", cursor.getValue());
+
+                    assertTrue(cursor.moveCeiling(12345678901234.0f));
+                    assertEquals("Infinity", cursor.getValue());
+
+                    assertTrue(cursor.moveNext());
+                    assertEquals("Not a number", cursor.getValue());
+                }
+
+                tx.commit();
+            }
+        }
+    }
+
+    @Test
+    public void canStoreLocalDates() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<LocalDate, String> index = db.createIndex(tx, "Test", LocalDateSchema.INSTANCE, StringSchema.INSTANCE);
+
+                index.put(tx, LocalDate.of(1999, 1, 1), "One");
+                index.put(tx, LocalDate.of(1999, 1, 3), "Two");
+                index.put(tx, LocalDate.of(1999, 1, 5), "Three");
+
+                try (Cursor<LocalDate, String> cursor = index.createCursor(tx)) {
+                    assertTrue(cursor.moveCeiling(LocalDate.of(1998, 1, 1)));
+                    assertEquals(LocalDate.of(1999, 1, 1), cursor.getKey());
+                    assertEquals("One", cursor.getValue());
+
+                    assertTrue(cursor.moveCeiling(LocalDate.of(1999, 1, 2)));
+                    assertEquals(LocalDate.of(1999, 1, 3), cursor.getKey());
+                    assertEquals("Two", cursor.getValue());
+
+                    assertTrue(cursor.moveLast());
+                    assertEquals(LocalDate.of(1999, 1, 5), cursor.getKey());
+                    assertEquals("Three", cursor.getValue());
+                }
+
+                tx.commit();
+            }
+        }
+    }
+
+    private static <T> List<T> iteratorToList(Iterator<T> it) {
+        final ArrayList<T> result = new ArrayList<>();
+        while (it.hasNext()) {
+            result.add(it.next());
+        }
+        return result;
+    }
+
+    @Test
+    public void canStoreLongs() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<Long, String> index = db.createIndex(tx, "Test", LongSchema.INSTANCE, StringSchema.INSTANCE);
+
+                index.put(tx, -100000000l, "Neg Big");
+                index.put(tx, -1l, "Neg One");
+                index.put(tx, 1l, "One");
+                index.put(tx, 100000000l, "Big");
+
+                assertEquals(Arrays.asList(-100000000l, -1l, 1l, 100000000l), iteratorToList(index.keys(tx)));
+
+                tx.commit();
+            }
+        }
+    }
+
+    @Test
+    public void canSwapSign() {
+        assertEquals(0x4AFEBABE,          Loader.swapSign(0xCAFEBABE));
+        assertEquals(0x4AFEBABEDEADBEEFl, Loader.swapSign(0xCAFEBABEDEADBEEFl));
+    }
+
+    @Test
+    public void unsignedIntegerSchemaStoresCorrectOrdering() {
+        final long ptr = unsafe.allocateMemory(Integer.BYTES);
+        try {
+            UnsignedIntegerSchema.INSTANCE.write(ptr, Integer.BYTES, 0xCAFEBABE);
+            assertEquals((byte)0xCA, unsafe.getByte(ptr + 0));
+            assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
+            assertEquals((byte)0xBE, unsafe.getByte(ptr + Integer.BYTES - 1));
+        } finally {
+            unsafe.freeMemory(ptr);
+        }
+    }
+
+    @Test
+    public void integerSchemaStoresCorrectOrdering() {
+        final long ptr = unsafe.allocateMemory(Integer.BYTES);
+        try {
+            IntegerSchema.INSTANCE.write(ptr, Integer.BYTES, 0xCAFEBABE);
+            // 0xC = 12 = 1010b ==> 0010b = 0x4
+            assertEquals((byte)0x4A, unsafe.getByte(ptr + 0));
+            assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
+            assertEquals((byte)0xBE, unsafe.getByte(ptr + Integer.BYTES - 1));
+        } finally {
+            unsafe.freeMemory(ptr);
+        }
+    }
+
+    @Test
+    public void unsignedLongSchemaStoresCorrectOrdering() {
+        final long ptr = unsafe.allocateMemory(Long.BYTES);
+        try {
+            UnsignedLongSchema.INSTANCE.write(ptr, Long.BYTES, 0xCAFEBABEDEADBEEFl);
+            assertEquals((byte)0xCA, unsafe.getByte(ptr + 0));
+            assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
+            assertEquals((byte)0xEF, unsafe.getByte(ptr + Long.BYTES - 1));
+        } finally {
+            unsafe.freeMemory(ptr);
+        }
+    }
+
+    @Test
+    public void longSchemaStoresCorrectOrdering() {
+        final long ptr = unsafe.allocateMemory(Long.BYTES);
+        try {
+            LongSchema.INSTANCE.write(ptr, Long.BYTES, 0xCAFEBABEDEADBEEFl);
+            // 0xC = 12 = 1010b ==> 0010b = 0x4
+            assertEquals((byte)0x4A, unsafe.getByte(ptr + 0));
+            assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
+            assertEquals((byte)0xEF, unsafe.getByte(ptr + Long.BYTES - 1));
+        } finally {
+            unsafe.freeMemory(ptr);
+        }
     }
 
     @Test
@@ -92,15 +250,15 @@ public class LoaderTest {
         try (final Database db = createDatabase()) {
             try (final Transaction tx = db.transaction(false)) {
                 final Index<Integer, String> index = db.createIndex(tx, "Test", IntegerSchema.INSTANCE, StringSchema.INSTANCE);
-                final Cursor<Integer, String> cursor = index.createCursor(tx);
+                try (final Cursor<Integer, String> cursor = index.createCursor(tx)) {
+                    cursor.put(1, "Hello");
+                    cursor.put(2, "World");
+                    cursor.put(3, "!");
 
-                cursor.put(1, "Hello");
-                cursor.put(2, "World");
-                cursor.put(3, "!");
-
-                assertTrue(cursor.moveTo(2));
-                assertEquals("World", cursor.getValue());
-                assertEquals(2, cursor.getKey().longValue());
+                    assertTrue(cursor.moveTo(2));
+                    assertEquals("World", cursor.getValue());
+                    assertEquals(2, cursor.getKey().longValue());
+                }
 
                 tx.commit();
             }
@@ -113,21 +271,21 @@ public class LoaderTest {
             final Index<Integer, String> index;
             try (final Transaction tx = db.transaction(false)) {
                 index = db.createIndex(tx, "Test", IntegerSchema.INSTANCE, StringSchema.INSTANCE);
-                final Cursor<Integer, String> cursor = index.createCursor(tx);
-
-                cursor.put(1, "Hello");
-                cursor.put(2, "World");
-                cursor.put(3, "!");
+                try (final Cursor<Integer, String> cursor = index.createCursor(tx)) {
+                    cursor.put(1, "Hello");
+                    cursor.put(2, "World");
+                    cursor.put(3, "!");
+                }
 
                 tx.commit();
             }
 
             try (final Transaction tx = db.transaction(true)) {
-                final Cursor<Integer, String> cursor = index.createCursor(tx);
-
-                assertTrue(cursor.moveTo(2));
-                assertEquals("World", cursor.getValue());
-                assertEquals(2, cursor.getKey().longValue());
+                try (final Cursor<Integer, String> cursor = index.createCursor(tx)) {
+                    assertTrue(cursor.moveTo(2));
+                    assertEquals("World", cursor.getValue());
+                    assertEquals(2, cursor.getKey().longValue());
+                }
             }
         }
     }
@@ -142,6 +300,117 @@ public class LoaderTest {
                 index.put(tx, "Goodbye", "Hades");
 
                 assertEquals("World", index.get(tx, "Hello"));
+
+                tx.commit();
+            }
+        }
+    }
+
+    @Test
+    public void moveCursor() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<Integer, String> index = db.createIndex(tx, "Test", IntegerSchema.INSTANCE, new Latin1StringSchema(10));
+
+                index.put(tx, 1, "World");
+                index.put(tx, 3, "Heaven");
+                index.put(tx, 5, "Hades");
+
+                try (final Cursor<Integer, String> cursor = index.createCursor(tx)) {
+
+                    // moveFirst/moveNext/moveLast
+
+                    assertTrue(cursor.moveFirst());
+                    assertEquals(1, cursor.getKey().intValue());
+                    assertEquals("World", cursor.getValue());
+
+                    assertFalse(cursor.movePrevious());
+
+                    assertTrue(cursor.moveNext());
+                    assertEquals(3, cursor.getKey().intValue());
+                    assertEquals("Heaven", cursor.getValue());
+
+                    assertTrue(cursor.moveLast());
+                    assertEquals(5, cursor.getKey().intValue());
+                    assertEquals("Hades", cursor.getValue());
+
+                    assertFalse(cursor.moveNext());
+
+
+                    // movePrevious when you are at the start doesn't do anything to your current position:
+                    assertTrue(cursor.moveFirst());
+                    assertTrue(cursor.moveNext());
+                    assertEquals(3, cursor.getKey().intValue());
+
+                    // moveNext when you are at the end doesn't do anything to your current position:
+                    assertTrue(cursor.moveLast());
+                    assertTrue(cursor.movePrevious());
+                    assertEquals(3, cursor.getKey().intValue());
+
+
+                    // moveTo
+
+                    assertTrue(cursor.moveTo(3));
+                    assertEquals(3, cursor.getKey().intValue());
+                    assertEquals("Heaven", cursor.getValue());
+
+                    assertTrue(cursor.moveTo(1));
+                    assertEquals(1, cursor.getKey().intValue());
+                    assertEquals("World", cursor.getValue());
+
+                    assertTrue(cursor.moveTo(5));
+                    assertEquals(5, cursor.getKey().intValue());
+                    assertEquals("Hades", cursor.getValue());
+
+                    assertFalse(cursor.moveTo(4));
+
+
+                    // moveCeiling
+
+                    assertTrue(cursor.moveCeiling(2));
+                    assertEquals(3, cursor.getKey().intValue());
+                    assertEquals("Heaven", cursor.getValue());
+
+                    assertTrue(cursor.moveCeiling(3));
+                    assertEquals(3, cursor.getKey().intValue());
+                    assertEquals("Heaven", cursor.getValue());
+
+                    assertTrue(cursor.moveCeiling(0));
+                    assertEquals(1, cursor.getKey().intValue());
+                    assertEquals("World", cursor.getValue());
+
+                    assertFalse(cursor.moveCeiling(6));
+
+                    // At this point the cursor is "off the end" so going back 1 will take us to the last item
+                    assertTrue(cursor.movePrevious());
+                    assertEquals(5, cursor.getKey().intValue());
+                    assertEquals("Hades", cursor.getValue());
+
+
+                    // moveFloor
+
+                    assertTrue(cursor.moveFloor(4));
+                    assertEquals(3, cursor.getKey().intValue());
+                    assertEquals("Heaven", cursor.getValue());
+
+                    assertTrue(cursor.moveFloor(3));
+                    assertEquals(3, cursor.getKey().intValue());
+                    assertEquals("Heaven", cursor.getValue());
+
+                    assertTrue(cursor.moveFloor(6));
+                    assertEquals(5, cursor.getKey().intValue());
+                    assertEquals("Hades", cursor.getValue());
+
+                    assertFalse(cursor.moveFloor(0));
+
+                    // At this point the cursor is (a bit inconsistently..) actually pointing to the first item.
+                    // There doesn't seem be any way to get it to go "off the beginning" such that moveNext()
+                    // takes you to the first item, otherwise I'd probably arrange for moveFloor() to do that.
+                    // (I tried going to the first item then doing movePrevious() but that just leaves you in the same place.)
+                    assertTrue(cursor.moveNext());
+                    assertEquals(3, cursor.getKey().intValue());
+                    assertEquals("Heaven", cursor.getValue());
+                }
 
                 tx.commit();
             }

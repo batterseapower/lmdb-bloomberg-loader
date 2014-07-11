@@ -1,7 +1,6 @@
 package uk.co.omegaprime;
 
 import au.com.bytecode.opencsv.CSVReader;
-import org.fusesource.lmdbjni.Constants;
 import org.fusesource.lmdbjni.JNI;
 import org.fusesource.lmdbjni.Util;
 import sun.misc.Unsafe;
@@ -177,6 +176,8 @@ public class Loader {
             }
         }
 
+        // FIXME: lexicographic ordering
+        // FIXME: could infer length from the fact that the 2nd thing is fixed length
         public static <T, U, V> Schema<V> zipWith(Schema<T> leftSchema, Function<V, T> leftProj, Schema<U> rightSchema, Function<V, U> rightProj, BiFunction<T, U, V> f) {
             return new Schema<V>() {
                 @Override
@@ -251,24 +252,76 @@ public class Loader {
         }
     }
 
+    static class VoidSchema implements Schema<Void> {
+        public static VoidSchema INSTANCE = new VoidSchema();
+
+        public Void read(long ptr, int sz) { return null; }
+        public int fixedSize() { return 0; }
+        public int maximumSize() { return fixedSize(); }
+        public int size(Void x) { return fixedSize(); }
+        public void write(long ptr, int sz, Void x) { }
+    }
+
+    private static int bigEndian(int x) { return (ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN) ? x : Integer.reverseBytes(x); }
+    private static long bigEndian(long x) { return (ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN) ? x : Long.reverseBytes(x); }
+
+    static int swapSign(int x) { return (x & 0x7FFFFFFF) | (~x & 0x80000000); }
+    static long swapSign(long x) { return (x & 0x7FFFFFFFFFFFFFFFl) | (~x & 0x8000000000000000l); }
+
     static class IntegerSchema implements Schema<Integer> {
         public static IntegerSchema INSTANCE = new IntegerSchema();
 
-        public Integer read(long ptr, int sz) { return unsafe.getInt(ptr); }
+        private static int fromDB(int x) { return swapSign(bigEndian(x)); }
+        private static int toDB(int x) { return bigEndian(swapSign(x)); }
+
+        public Integer read(long ptr, int sz) { return fromDB(unsafe.getInt(ptr)); }
         public int fixedSize() { return Integer.BYTES; }
         public int maximumSize() { return fixedSize(); }
         public int size(Integer x) { return fixedSize(); }
-        public void write(long ptr, int sz, Integer x) { unsafe.putInt(ptr, x); }
+        public void write(long ptr, int sz, Integer x) { unsafe.putInt(ptr, toDB(x)); }
+    }
+
+    static class UnsignedIntegerSchema implements Schema<Integer> {
+        public static UnsignedIntegerSchema INSTANCE = new UnsignedIntegerSchema();
+
+        public Integer read(long ptr, int sz) { return bigEndian(unsafe.getInt(ptr)); }
+        public int fixedSize() { return Long.BYTES; }
+        public int maximumSize() { return fixedSize(); }
+        public int size(Integer x) { return fixedSize(); }
+        public void write(long ptr, int sz, Integer x) { unsafe.putInt(ptr, bigEndian(x)); }
     }
 
     static class LongSchema implements Schema<Long> {
         public static LongSchema INSTANCE = new LongSchema();
 
-        public Long read(long ptr, int sz) { return unsafe.getLong(ptr); }
+        private static long fromDB(long x) { return swapSign(bigEndian(x)); }
+        private static long toDB(long x) { return bigEndian(swapSign(x)); }
+
+        public Long read(long ptr, int sz) { return fromDB(unsafe.getLong(ptr)); }
         public int fixedSize() { return Long.BYTES; }
         public int maximumSize() { return fixedSize(); }
         public int size(Long x) { return fixedSize(); }
-        public void write(long ptr, int sz, Long x) { unsafe.putLong(ptr, x); }
+        public void write(long ptr, int sz, Long x) { unsafe.putLong(ptr, toDB(x)); }
+    }
+
+    static class UnsignedLongSchema implements Schema<Long> {
+        public static UnsignedLongSchema INSTANCE = new UnsignedLongSchema();
+
+        public Long read(long ptr, int sz) { return bigEndian(unsafe.getLong(ptr)); }
+        public int fixedSize() { return Long.BYTES; }
+        public int maximumSize() { return fixedSize(); }
+        public int size(Long x) { return fixedSize(); }
+        public void write(long ptr, int sz, Long x) { unsafe.putLong(ptr, bigEndian(x)); }
+    }
+
+    static class FloatSchema implements Schema<Float> {
+        public static FloatSchema INSTANCE = new FloatSchema();
+
+        public Float read(long ptr, int sz) { return Float.intBitsToFloat(bigEndian(unsafe.getInt(ptr))); }
+        public int fixedSize() { return Float.BYTES; }
+        public int maximumSize() { return fixedSize(); }
+        public int size(Float x) { return fixedSize(); }
+        public void write(long ptr, int sz, Float x) { unsafe.putInt(ptr, bigEndian(Float.floatToRawIntBits(x))); }
     }
 
     static class Latin1StringSchema implements Schema<String> {
@@ -453,6 +506,7 @@ public class Loader {
         // INVARIANT: sz == schema.size(x)
         private static <T> void fillBufferPointerFromSchema(Schema<T> schema, long bufferPtr, int sz, T x) {
             fillBufferPointerSizeFromSchema(schema, bufferPtr, sz);
+            unsafe.putAddress(bufferPtr + Unsafe.ADDRESS_SIZE, bufferPtr + 2 * Unsafe.ADDRESS_SIZE);
             schema.write(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, sz, x);
         }
 
@@ -461,7 +515,6 @@ public class Loader {
                 return bufferPtr;
             } else {
                 final long bufferPtrNow = unsafe.allocateMemory(2 * Unsafe.ADDRESS_SIZE + sz);
-                unsafe.putAddress(bufferPtrNow + Unsafe.ADDRESS_SIZE, bufferPtrNow + 2 * Unsafe.ADDRESS_SIZE);
                 return bufferPtrNow;
             }
         }
@@ -559,23 +612,47 @@ public class Loader {
             }
         }
 
-        public Iterator<Pair<K, V>> keyValues(Transaction tx) {
+        public Iterator<K> keys(Transaction tx) {
             final Cursor<K, V> cursor = createCursor(tx);
-            boolean initialAtEnd = cursor.moveFirst();
-            return new Iterator<Pair<K, V>>() {
-                boolean atEnd = initialAtEnd;
+            final boolean initialHasNext = cursor.moveFirst();
+            return new Iterator<K>() {
+                boolean hasNext = initialHasNext;
 
                 public boolean hasNext() {
-                    return !atEnd;
+                    return hasNext;
+                }
+
+                @Override
+                public K next() {
+                    if (!hasNext) throw new IllegalStateException("No more elements");
+
+                    final K key = cursor.getKey();
+                    hasNext = cursor.moveNext();
+                    if (!hasNext) {
+                        cursor.close();
+                    }
+                    return key;
+                }
+            };
+        }
+
+        public Iterator<Pair<K, V>> keyValues(Transaction tx) {
+            final Cursor<K, V> cursor = createCursor(tx);
+            final boolean initialHasNext = cursor.moveFirst();
+            return new Iterator<Pair<K, V>>() {
+                boolean hasNext = initialHasNext;
+
+                public boolean hasNext() {
+                    return hasNext;
                 }
 
                 @Override
                 public Pair<K, V> next() {
-                    if (atEnd) throw new IllegalStateException("No more elements");
+                    if (!hasNext) throw new IllegalStateException("No more elements");
 
                     final Pair<K, V> pair = new Pair<>(cursor.getKey(), cursor.getValue());
-                    atEnd = cursor.moveNext();
-                    if (atEnd) {
+                    hasNext = cursor.moveNext();
+                    if (!hasNext) {
                         cursor.close();
                     }
                     return pair;
@@ -595,7 +672,7 @@ public class Loader {
     }
 
     // TODO: duplicate item support
-    static class Cursor<K, V> {
+    static class Cursor<K, V> implements AutoCloseable {
         final Index<K, V> index;
         final long cursor;
 
@@ -637,6 +714,8 @@ public class Loader {
         public boolean moveNext()     { return move(JNI.MDB_NEXT); }
         public boolean movePrevious() { return move(JNI.MDB_PREV); }
 
+        boolean refresh() { return move(JNI.MDB_GET_CURRENT); }
+
         private boolean move(K k, int op) {
             final int kSz = index.kSchema.size(k);
 
@@ -656,21 +735,27 @@ public class Loader {
         public boolean moveTo(K k)      { return move(k, JNI.MDB_SET_KEY); }
         public boolean moveCeiling(K k) { return move(k, JNI.MDB_SET_RANGE); }
 
+        public boolean moveFloor(K k) {
+            return (moveCeiling(k) && getKey().equals(k)) || movePrevious();
+        }
+
         public K getKey() {
-            if (bufferPtrStale) { move(JNI.MDB_GET_CURRENT); }
+            if (bufferPtrStale) { refresh(); }
             return index.kSchema.read(unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr));
         }
 
         public V getValue() {
-            if (bufferPtrStale) { move(JNI.MDB_GET_CURRENT); }
+            if (bufferPtrStale) { refresh(); }
             return index.vSchema.read(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE));
         }
 
         public void put(V v) {
+            if (bufferPtrStale) { refresh(); }
+
             final int vSz = index.vSchema.size(v);
 
             unsafe.putAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, vSz);
-            Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, 0, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, JNI.MDB_CURRENT | JNI.MDB_RESERVE));
+            Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, JNI.MDB_CURRENT | JNI.MDB_RESERVE));
             index.vSchema.write(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), vSz, v);
 
             bufferPtrStale = false;
@@ -750,7 +835,7 @@ public class Loader {
                 while (it.hasNext()) {
                     final File file = it.next();
                     if (!sourcesIndex.contains(tx, file)) {
-                        load(db, tx, file);
+                        loadZip(db, tx, file);
                         sourcesIndex.put(tx, file, new Source(Instant.now()));
                     }
                 }
@@ -779,10 +864,31 @@ public class Loader {
                                                                  FieldKey::new);
     }
 
+    private static class FieldValue {
+        private final String value;
+        private final LocalDate toDate;
+
+        public FieldValue(String value, LocalDate toDate) {
+            this.value = value;
+            this.toDate = toDate;
+        }
+
+        public String getValue() { return value; }
+        public LocalDate getToDate() { return toDate; }
+
+        public FieldValue setToDate(LocalDate toDate) { return new FieldValue(value, toDate); }
+    }
+
+    private static class FieldValueSchema {
+        public static Schema<FieldValue> INSTANCE = Schema.zipWith(new Latin1StringSchema(64), FieldValue::getValue,
+                                                                   LocalDateSchema.INSTANCE,   FieldValue::getToDate,
+                                                                   FieldValue::new);
+    }
+
     final static Pattern FILENAME_REGEX = Pattern.compile("Equity_Common_Stock_([0-9]+)[.]txt[.]zip");
     final static DateTimeFormatter FILENAME_DTF = DateTimeFormatter.ofPattern("yyyyMMdd");
 
-    public static void load(Database db, Transaction tx, File file) throws IOException {
+    public static void loadZip(Database db, Transaction tx, File file) throws IOException {
         final Matcher m = FILENAME_REGEX.matcher(file.getName());
         if (!m.matches()) throw new IllegalStateException("Supplied file name " + file.getName() + " did not match expected pattern");
 
@@ -793,60 +899,153 @@ public class Loader {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
                 System.out.println("Loading " + file + ":" + entry);
-                final CSVReader reader = new CSVReader(new InputStreamReader(zis), '|');
-                String[] headers = reader.readNext();
-                if (headers == null || headers.length == 1) {
-                    // Empty file
-                    return;
-                }
-
-                int idBBGlobalIx = -1;
-                final Cursor<FieldKey, String>[] cursors = (Cursor<FieldKey, String>[]) new Cursor[headers.length];
-                for (int i = 0; i < headers.length; i++) {
-                    if (headers[i].equals("ID_BB_GLOBAL")) {
-                        idBBGlobalIx = i;
-                    } else {
-                        final String indexName = headers[i].replace(" ", "");
-                        final Index<FieldKey, String> index = db.createIndex(tx, indexName, FieldKeySchema.INSTANCE, new Latin1StringSchema(64));
-                        cursors[i] = index.createCursor(tx);
-                    }
-                }
-
-                if (idBBGlobalIx < 0) {
-                    throw new IllegalArgumentException("File " + file + " does not have ID_BB_GLOBAL field");
-                }
-
-                int items = 0;
-                long startTime = System.nanoTime();
-
-                String[] line;
-                while ((line = reader.readNext()) != null) {
-                    if (line.length < headers.length) {
-                        continue;
-                    }
-
-                    final FieldKey key = new FieldKey(line[idBBGlobalIx], date);
-                    for (int i = 0; i < headers.length; i++) {
-                        if (i == idBBGlobalIx) continue;
-
-                        final Cursor<FieldKey, String> cursor = cursors[i];
-                        final String value = line[i].trim();
-
-                        items++;
-
-                        if (value.length() == 0) {
-                            if (cursor.moveTo(key)) {
-                                cursor.delete();
-                            }
-                        } else {
-                            cursor.put(key, value);
-                        }
-                    }
-                }
-
-                long duration = System.nanoTime() - startTime;
-                System.out.println("Loaded " + items + " in " + duration + "ns (" + (duration / items) + "ns/item)");
+                // Dense:
+                //loadZippedFile(db, tx, date, zis);
+                // Range-based:
+                loadZippedFile2(db, tx, date, zis);
             }
         }
+    }
+
+    private static void loadZippedFile(Database db, Transaction tx, LocalDate date, ZipInputStream zis) throws IOException {
+        final CSVReader reader = new CSVReader(new InputStreamReader(zis), '|');
+        String[] headers = reader.readNext();
+        if (headers == null || headers.length == 1) {
+            // Empty file
+            return;
+        }
+
+        int idBBGlobalIx = -1;
+        final Cursor<FieldKey, String>[] cursors = (Cursor<FieldKey, String>[]) new Cursor[headers.length];
+        for (int i = 0; i < headers.length; i++) {
+            if (headers[i].equals("ID_BB_GLOBAL")) {
+                idBBGlobalIx = i;
+            } else {
+                final String indexName = headers[i].replace(" ", "");
+                final Index<FieldKey, String> index = db.createIndex(tx, indexName, FieldKeySchema.INSTANCE, new Latin1StringSchema(64));
+                cursors[i] = index.createCursor(tx);
+            }
+        }
+
+        if (idBBGlobalIx < 0) {
+            throw new IllegalArgumentException("No ID_BB_GLOBAL field");
+        }
+
+        int items = 0;
+        long startTime = System.nanoTime();
+
+        String[] line;
+        while ((line = reader.readNext()) != null) {
+            if (line.length < headers.length) {
+                continue;
+            }
+
+            final FieldKey key = new FieldKey(line[idBBGlobalIx], date);
+            for (int i = 0; i < headers.length; i++) {
+                if (i == idBBGlobalIx) continue;
+
+                final Cursor<FieldKey, String> cursor = cursors[i];
+                final String value = line[i].trim();
+
+                items++;
+
+                if (value.length() == 0) {
+                    if (cursor.moveTo(key)) {
+                        cursor.delete();
+                    }
+                } else {
+                    cursor.put(key, value);
+                }
+            }
+        }
+
+        for (Cursor cursor : cursors) {
+            cursor.close();
+        }
+
+        long duration = System.nanoTime() - startTime;
+        System.out.println("Loaded " + items + " in " + duration + "ns (" + (duration / items) + "ns/item)");
+    }
+
+    private static void loadZippedFile2(Database db, Transaction tx, LocalDate date, ZipInputStream zis) throws IOException {
+        final CSVReader reader = new CSVReader(new InputStreamReader(zis), '|');
+        String[] headers = reader.readNext();
+        if (headers == null || headers.length == 1) {
+            // Empty file
+            return;
+        }
+
+        int idBBGlobalIx = -1;
+        final Cursor<FieldKey, FieldValue>[] cursors = (Cursor<FieldKey, FieldValue>[]) new Cursor[headers.length];
+        for (int i = 0; i < headers.length; i++) {
+            if (headers[i].equals("ID_BB_GLOBAL")) {
+                idBBGlobalIx = i;
+            } else {
+                final String indexName = headers[i].replace(" ", "");
+                final Index<FieldKey, FieldValue> index = db.createIndex(tx, indexName, FieldKeySchema.INSTANCE, FieldValueSchema.INSTANCE);
+                cursors[i] = index.createCursor(tx);
+            }
+        }
+
+        if (idBBGlobalIx < 0) {
+            throw new IllegalArgumentException("No ID_BB_GLOBAL field");
+        }
+
+        int items = 0;
+        long startTime = System.nanoTime();
+
+        String[] line;
+        while ((line = reader.readNext()) != null) {
+            if (line.length < headers.length) {
+                continue;
+            }
+
+            final FieldKey fieldKey = new FieldKey(line[idBBGlobalIx], date);
+            for (int i = 0; i < headers.length; i++) {
+                if (i == idBBGlobalIx) continue;
+
+                final Cursor<FieldKey, FieldValue> cursor = cursors[i];
+                final String value = line[i].trim();
+
+                items++;
+
+                if (value.length() == 0) {
+                    if (cursor.moveFloor(fieldKey) && cursor.getKey().idBBGlobal.equals(fieldKey.idBBGlobal)) {
+                        // There is a range in the map starting before the date of interest: we might have to truncate it
+                        final FieldValue fieldValue = cursor.getValue();
+                        if (fieldValue.getToDate().isAfter(date)) {
+                            cursor.put(fieldValue.setToDate(date));
+                        }
+                    }
+                } else {
+                    final boolean mustCreate;
+                    if (cursor.moveFloor(fieldKey) && cursor.getKey().idBBGlobal.equals(fieldKey.idBBGlobal)) {
+                        final FieldValue fieldValue = cursor.getValue();
+                        if (fieldValue.getToDate().isAfter(date)) {
+                            // There is a range in the map enclosing the date of interest
+                            if (fieldValue.value.equals(value)) {
+                                mustCreate = false;
+                            } else {
+                                cursor.put(fieldValue.setToDate(date));
+                                mustCreate = true;
+                            }
+                        } else {
+                            // The earlier range has nothing to say about this date: just add
+                            mustCreate = true;
+                        }
+                    } else {
+                        // This is the earliest date for the (security, field) pair: just add
+                        mustCreate = true;
+                    }
+
+                    if (mustCreate) {
+                        cursor.put(fieldKey, new FieldValue(value, LocalDate.of(2999, 1, 1))); // TODO: nulls or ADTs instead of a dummy value?
+                    }
+                }
+            }
+        }
+
+        long duration = System.nanoTime() - startTime;
+        System.out.println("Loaded " + items + " in " + duration + "ns (" + (duration / items) + "ns/item)");
     }
 }
