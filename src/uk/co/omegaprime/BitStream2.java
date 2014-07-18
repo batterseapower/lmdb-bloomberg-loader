@@ -90,6 +90,15 @@ public class BitStream2 {
         return result;
     }
 
+    public long getLong() {
+        long x0 = bigEndian(Bits.unsafe.getLong(ptr));
+        long result0 = ((x0 << bitOffset) >>> 32);
+        long x1 = bigEndian(Bits.unsafe.getLong(ptr + 4));
+        long result1 = ((x1 << bitOffset) >>> 32);
+        advance(8);
+        return (result0 << 32) | result1;
+    }
+
     public void writeWaste(boolean continues) {
         if (depth == 0) {
             return;
@@ -122,8 +131,23 @@ public class BitStream2 {
         writeWaste(true);
         final long mask = 0xFFFFFFFFl << (32 - bitOffset);
         long cleared = bigEndian(Bits.unsafe.getLong(ptr)) & ~mask;
-        Bits.unsafe.putLong(ptr, bigEndian(cleared | ((long)x << (32 - bitOffset))));
+        Bits.unsafe.putLong(ptr, bigEndian(cleared | ((x & 0xFFFFFFFFl) << (32 - bitOffset))));
         advance(4);
+    }
+
+    public void putLong(long x) {
+        writeWaste(true);
+        // Fake it by doing two 32-bit writes:
+        final long mask = 0xFFFFFFFFl << (32 - bitOffset);
+        {
+            long cleared = bigEndian(Bits.unsafe.getLong(ptr)) & ~mask;
+            Bits.unsafe.putLong(ptr, bigEndian(cleared | ((x >>> 32) << (32 - bitOffset))));
+        }
+        {
+            long cleared = bigEndian(Bits.unsafe.getLong(ptr + 4)) & ~mask;
+            Bits.unsafe.putLong(ptr + 4, bigEndian(cleared | ((x & 0xFFFFFFFFl) << (32 - bitOffset))));
+        }
+        advance(8);
     }
 
     public void advance(int nBytes) {

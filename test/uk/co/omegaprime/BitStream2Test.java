@@ -87,4 +87,31 @@ public class BitStream2Test {
 
         Bits.unsafe.freeMemory(ptr);
     }
+
+    @Test
+    public void testLongs() {
+        final long ptr = Bits.unsafe.allocateMemory(33);
+
+        {
+            final BitStream2 bs = new BitStream2(ptr, 33);
+            bs.putLong(1337);
+            bs.putLong(-1337);
+            bs.deeper();
+            bs.putLong(100);
+            bs.putLong(-100);
+            bs.putEnd();
+        }
+
+        {
+            final BitStream2 bs = new BitStream2(ptr, 33);
+            assertEquals(1337, bs.getLong());
+            assertEquals(-1337, bs.getLong());
+            bs.deeper();
+            assertEquals(100, bs.getLong());
+            assertEquals(-100, bs.getLong());
+            assertTrue(bs.tryGetEnd());
+        }
+
+        Bits.unsafe.freeMemory(ptr);
+    }
 }
