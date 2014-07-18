@@ -10,6 +10,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static uk.co.omegaprime.Loader.*;
+import static uk.co.omegaprime.Bits.*;
 
 public class LoaderTest {
     static final File dbDirectory = new File("/Users/mbolingbroke/example.lmdb");
@@ -126,12 +127,6 @@ public class LoaderTest {
                 tx.commit();
             }
         }
-    }
-
-    @Test
-    public void canSwapSign() {
-        assertEquals(0x4AFEBABE,          Loader.swapSign(0xCAFEBABE));
-        assertEquals(0x4AFEBABEDEADBEEFl, Loader.swapSign(0xCAFEBABEDEADBEEFl));
     }
 
     @Test

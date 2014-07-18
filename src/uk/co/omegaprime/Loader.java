@@ -22,21 +22,10 @@ import java.util.stream.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+import static uk.co.omegaprime.Bits.*;
+
 public class Loader {
-    protected static final Unsafe unsafe = getUnsafe();
-
-    @SuppressWarnings("restriction")
-    private static Unsafe getUnsafe() {
-        try {
-
-            Field singleoneInstanceField = Unsafe.class.getDeclaredField("theUnsafe");
-            singleoneInstanceField.setAccessible(true);
-            return (Unsafe) singleoneInstanceField.get(null);
-
-        } catch (IllegalArgumentException | SecurityException | NoSuchFieldException | IllegalAccessException e) {
-            throw new RuntimeException(e);
-        }
-    }
+    private static final Unsafe unsafe = Bits.unsafe;
 
     private static class Source {
         private final Instant instant;
@@ -153,8 +142,44 @@ public class Loader {
     }
 
     interface Schema<T> {
-        // FIXME: lexicographic ordering
         public static <T, U, V> Schema<V> zipWith(Schema<T> leftSchema, Function<V, T> leftProj, Schema<U> rightSchema, Function<V, U> rightProj, BiFunction<T, U, V> f) {
+            // FIXME: implement properly
+            return new Schema<V>() {
+                @Override
+                public V read(long ptr, int sz) {
+                    if (leftSchema.fixedSize() >= 0) {
+                        final int leftSz = leftSchema.fixedSize();
+                        final T left  = leftSchema .read(ptr,          leftSz);
+                        final U right = rightSchema.read(ptr + leftSz, sz - leftSz);
+                        return f.apply(left, right);
+                    } else {
+                        return null; // FIXME
+                    }
+                }
+
+                @Override
+                public int fixedSize() {
+                    return 0;
+                }
+
+                @Override
+                public int maximumSize() {
+                    return 0;
+                }
+
+                @Override
+                public int size(V x) {
+                    return 0;
+                }
+
+                @Override
+                public void write(long ptr, int sz, V x) {
+
+                }
+            };
+        }
+
+        public static <T, U, V> Schema<V> zipWithUnordered(Schema<T> leftSchema, Function<V, T> leftProj, Schema<U> rightSchema, Function<V, U> rightProj, BiFunction<T, U, V> f) {
             return new Schema<V>() {
                 @Override
                 public V read(long ptr, int sz) {
@@ -264,12 +289,6 @@ public class Loader {
         public int size(Void x) { return fixedSize(); }
         public void write(long ptr, int sz, Void x) { }
     }
-
-    private static int bigEndian(int x) { return (ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN) ? x : Integer.reverseBytes(x); }
-    private static long bigEndian(long x) { return (ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN) ? x : Long.reverseBytes(x); }
-
-    static int swapSign(int x) { return (x & 0x7FFFFFFF) | (~x & 0x80000000); }
-    static long swapSign(long x) { return (x & 0x7FFFFFFFFFFFFFFFl) | (~x & 0x8000000000000000l); }
 
     static class IntegerSchema implements Schema<Integer> {
         public static IntegerSchema INSTANCE = new IntegerSchema();
