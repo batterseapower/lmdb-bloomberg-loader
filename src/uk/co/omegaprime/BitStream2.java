@@ -7,15 +7,24 @@ public class BitStream2 {
     private long ptr;
     private long endPtr;
     private byte bitOffset = 0;
-    private boolean waste = true; // TODO: control by ref counting
+    private int depth = 0;
 
     public BitStream2(long ptr, int sz) {
         this.ptr = ptr;
         this.endPtr = ptr + sz;
     }
 
+    public void deeper() {
+        if (depth == 0) {
+            depth = 1;
+            advance(0);
+        } else {
+            depth += 1;
+        }
+    }
+
     public boolean tryGetEnd() {
-        if (!waste) {
+        if (depth == 0) {
             // After writing a stream we do not necessarily end up on a byte boundary, even if we started on one.
             // This method still returns true iff we at the end of the stream, so long as we don't write to the
             // bitstream in units of less than 8 bits.
@@ -29,6 +38,7 @@ public class BitStream2 {
             }
 
             if (isEnd) {
+                depth -= 1;
                 advance(0);
             }
             return isEnd;
@@ -50,7 +60,7 @@ public class BitStream2 {
     }
 
     public void writeWaste(boolean continues) {
-        if (!waste) {
+        if (depth == 0) {
             return;
         }
 
@@ -65,6 +75,7 @@ public class BitStream2 {
 
     public void putEnd() {
         writeWaste(false);
+        depth -= 1;
         advance(0);
     }
 
@@ -85,7 +96,7 @@ public class BitStream2 {
     }
 
     public void advance(int nBytes) {
-        int newBitOffset = bitOffset + nBytes * 8 + (waste ? 1 : 0);
+        int newBitOffset = bitOffset + nBytes * 8 + (depth > 0 ? 1 : 0);
         ptr += newBitOffset / 8;
         bitOffset = (byte)(newBitOffset % 8);
     }
