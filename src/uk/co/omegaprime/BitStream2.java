@@ -45,6 +45,37 @@ public class BitStream2 {
         }
     }
 
+    // This can be implemented by the clients in the terms of other methods, but it is universally handy
+    public int bytesToEnd() {
+        if (depth == 0) {
+            return (int)(endPtr - ptr - (bitOffset == 0 ? 0 : 1));
+        } else {
+            int count = -1;
+            boolean isEnd;
+            long ptrPrime = ptr;
+            byte bitOffsetPrime = bitOffset;
+            do {
+                count++;
+
+                if (bitOffsetPrime == 0) {
+                    isEnd = (Bits.unsafe.getByte(ptrPrime - 1) & 1) == 0;
+                } else {
+                    isEnd = ((Bits.unsafe.getByte(ptrPrime) << (bitOffsetPrime - 1)) & 0x80) == 0;
+                }
+
+                if (bitOffsetPrime == 7) {
+                    bitOffsetPrime = 0;
+                    ptrPrime += 2;
+                } else {
+                    bitOffsetPrime++;
+                    ptrPrime++;
+                }
+            } while (!isEnd);
+
+            return count;
+        }
+    }
+
     public byte getByte() {
         short x = bigEndian(Bits.unsafe.getShort(ptr));
         byte result = (byte)((x << bitOffset) >> 8);

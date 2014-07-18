@@ -143,122 +143,46 @@ public class Loader {
 
     interface Schema<T> {
         public static <T, U, V> Schema<V> zipWith(Schema<T> leftSchema, Function<V, T> leftProj, Schema<U> rightSchema, Function<V, U> rightProj, BiFunction<T, U, V> f) {
-            // FIXME: implement properly
             return new Schema<V>() {
                 @Override
-                public V read(long ptr, int sz) {
-                    if (leftSchema.fixedSize() >= 0) {
-                        final int leftSz = leftSchema.fixedSize();
-                        final T left  = leftSchema .read(ptr,          leftSz);
-                        final U right = rightSchema.read(ptr + leftSz, sz - leftSz);
-                        return f.apply(left, right);
-                    } else {
-                        return null; // FIXME
-                    }
+                public V read(BitStream2 bs) {
+                    return f.apply(leftSchema.read(bs), rightSchema.read(bs));
                 }
 
                 @Override
                 public int fixedSize() {
-                    return 0;
+                    return (leftSchema.fixedSize() >= 0 && rightSchema.fixedSize() >= 0) ? leftSchema.fixedSize() + rightSchema.fixedSize() : -1;
                 }
 
                 @Override
                 public int maximumSize() {
-                    return 0;
+                    return (leftSchema.maximumSize() >= 0 && rightSchema.maximumSize() >= 0) ? Math.max(leftSchema.maximumSize(), rightSchema.maximumSize()) : -1;
                 }
 
                 @Override
                 public int size(V x) {
-                    return 0;
+                    return leftSchema.size(leftProj.apply(x)) + rightSchema.size(rightProj.apply(x));
                 }
 
                 @Override
-                public void write(long ptr, int sz, V x) {
-
+                public void write(BitStream2 bs, V x) {
+                    leftSchema.write (bs, leftProj .apply(x));
+                    rightSchema.write(bs, rightProj.apply(x));
                 }
             };
         }
 
-        public static <T, U, V> Schema<V> zipWithUnordered(Schema<T> leftSchema, Function<V, T> leftProj, Schema<U> rightSchema, Function<V, U> rightProj, BiFunction<T, U, V> f) {
-            return new Schema<V>() {
-                @Override
-                public V read(long ptr, int sz) {
-                    final int leftSz;
-                    final int overhead;
-                    if (leftSchema.fixedSize() >= 0) {
-                        leftSz = leftSchema.fixedSize();
-                        overhead = 0;
-                    } else if (rightSchema.fixedSize() >= 0) {
-                        leftSz = sz - rightSchema.fixedSize();
-                        overhead = 0;
-                    } else {
-                        leftSz = unsafe.getInt(ptr);
-                        overhead = Integer.BYTES;
-                    }
-                    final T left  = leftSchema .read(ptr + overhead,          leftSz);
-                    final U right = rightSchema.read(ptr + overhead + leftSz, sz - leftSz - overhead);
-                    return f.apply(left, right);
-                }
-
-                @Override
-                public int fixedSize() {
-                    if (leftSchema.fixedSize() >= 0 && rightSchema.fixedSize() >= 0) {
-                        return leftSchema.fixedSize() + rightSchema.fixedSize();
-                    } else {
-                        return -1;
-                    }
-                }
-
-                @Override
-                public int maximumSize() {
-                    if (leftSchema.maximumSize() >= 0 && rightSchema.maximumSize() >= 0) {
-                        return (leftSchema.fixedSize() >= 0 || rightSchema.fixedSize() >= 0 ? 0 : Integer.BYTES) +
-                               leftSchema.maximumSize() + rightSchema.maximumSize();
-                    } else {
-                        return -1;
-                    }
-                }
-
-                @Override
-                public int size(V x) {
-                    return (leftSchema.fixedSize() >= 0 || rightSchema.fixedSize() >= 0 ? 0 : Integer.BYTES) +
-                           leftSchema.size(leftProj.apply(x)) + rightSchema.size(rightProj.apply(x));
-                }
-
-                @Override
-                public void write(long ptr, int sz, V x) {
-                    final T left = leftProj.apply(x);
-
-                    final int leftSz;
-                    final int overhead;
-                    if (leftSchema.fixedSize() >= 0) {
-                        leftSz = leftSchema.fixedSize();
-                        overhead = 0;
-                    } else if (rightSchema.fixedSize() >= 0) {
-                        leftSz = sz - rightSchema.fixedSize();
-                        overhead = 0;
-                    } else {
-                        leftSz = leftSchema.size(left);
-                        unsafe.putInt(ptr, leftSz);
-                        overhead = Integer.BYTES;
-                    }
-                    leftSchema .write(ptr + overhead,          leftSz,                 left);
-                    rightSchema.write(ptr + overhead + leftSz, sz - leftSz - overhead, rightProj.apply(x));
-                }
-            };
-        }
-
-        T read(long ptr, int sz);
+        T read(BitStream2 bs);
         int fixedSize();
         int maximumSize();
         int size(T x);
-        void write(long ptr, int sz, T x);
+        void write(BitStream2 bs, T x);
 
         default <U> Schema<U> map(Function<U, T> f, Function<T, U> g) {
             final Schema<T> parent = this;
             return new Schema<U>() {
-                public U read(long ptr, int sz) {
-                    return g.apply(parent.read(ptr, sz));
+                public U read(BitStream2 bs) {
+                    return g.apply(parent.read(bs));
                 }
 
                 public int fixedSize() {
@@ -273,8 +197,8 @@ public class Loader {
                     return parent.size(f.apply(x));
                 }
 
-                public void write(long ptr, int sz, U x) {
-                    parent.write(ptr, sz, f.apply(x));
+                public void write(BitStream2 bs, U x) {
+                    parent.write(bs, f.apply(x));
                 }
             };
         }
@@ -283,67 +207,61 @@ public class Loader {
     static class VoidSchema implements Schema<Void> {
         public static VoidSchema INSTANCE = new VoidSchema();
 
-        public Void read(long ptr, int sz) { return null; }
+        public Void read(BitStream2 bs) { return null; }
         public int fixedSize() { return 0; }
         public int maximumSize() { return fixedSize(); }
         public int size(Void x) { return fixedSize(); }
-        public void write(long ptr, int sz, Void x) { }
+        public void write(BitStream2 bs, Void x) { }
     }
 
     static class IntegerSchema implements Schema<Integer> {
         public static IntegerSchema INSTANCE = new IntegerSchema();
 
-        private static int fromDB(int x) { return swapSign(bigEndian(x)); }
-        private static int toDB(int x) { return bigEndian(swapSign(x)); }
-
-        public Integer read(long ptr, int sz) { return fromDB(unsafe.getInt(ptr)); }
+        public Integer read(BitStream2 bs) { return swapSign(bs.getInt()); }
         public int fixedSize() { return Integer.BYTES; }
         public int maximumSize() { return fixedSize(); }
         public int size(Integer x) { return fixedSize(); }
-        public void write(long ptr, int sz, Integer x) { unsafe.putInt(ptr, toDB(x)); }
+        public void write(BitStream2 bs, Integer x) { bs.putInt(swapSign(x)); }
     }
 
     static class UnsignedIntegerSchema implements Schema<Integer> {
         public static UnsignedIntegerSchema INSTANCE = new UnsignedIntegerSchema();
 
-        public Integer read(long ptr, int sz) { return bigEndian(unsafe.getInt(ptr)); }
+        public Integer read(BitStream2 bs) { return bs.getInt(); }
         public int fixedSize() { return Long.BYTES; }
         public int maximumSize() { return fixedSize(); }
         public int size(Integer x) { return fixedSize(); }
-        public void write(long ptr, int sz, Integer x) { unsafe.putInt(ptr, bigEndian(x)); }
+        public void write(BitStream2 bs, Integer x) { bs.putInt(x); }
     }
 
     static class LongSchema implements Schema<Long> {
         public static LongSchema INSTANCE = new LongSchema();
 
-        private static long fromDB(long x) { return swapSign(bigEndian(x)); }
-        private static long toDB(long x) { return bigEndian(swapSign(x)); }
-
-        public Long read(long ptr, int sz) { return fromDB(unsafe.getLong(ptr)); }
+        public Long read(BitStream2 bs) { return swapSign(bs.getLong()); }
         public int fixedSize() { return Long.BYTES; }
         public int maximumSize() { return fixedSize(); }
         public int size(Long x) { return fixedSize(); }
-        public void write(long ptr, int sz, Long x) { unsafe.putLong(ptr, toDB(x)); }
+        public void write(BitStream2 bs, Long x) { bs.putLong(swapSign(x)); }
     }
 
     static class UnsignedLongSchema implements Schema<Long> {
         public static UnsignedLongSchema INSTANCE = new UnsignedLongSchema();
 
-        public Long read(long ptr, int sz) { return bigEndian(unsafe.getLong(ptr)); }
+        public Long read(BitStream2 bs) { return bs.getLong(); }
         public int fixedSize() { return Long.BYTES; }
         public int maximumSize() { return fixedSize(); }
         public int size(Long x) { return fixedSize(); }
-        public void write(long ptr, int sz, Long x) { unsafe.putLong(ptr, bigEndian(x)); }
+        public void write(BitStream2 bs, Long x) { bs.putLong(x); }
     }
 
     static class FloatSchema implements Schema<Float> {
         public static FloatSchema INSTANCE = new FloatSchema();
 
-        public Float read(long ptr, int sz) { return Float.intBitsToFloat(bigEndian(unsafe.getInt(ptr))); }
+        public Float read(BitStream2 bs) { return Float.intBitsToFloat(bs.getInt()); }
         public int fixedSize() { return Float.BYTES; }
         public int maximumSize() { return fixedSize(); }
         public int size(Float x) { return fixedSize(); }
-        public void write(long ptr, int sz, Float x) { unsafe.putInt(ptr, bigEndian(Float.floatToRawIntBits(x))); }
+        public void write(BitStream2 bs, Float x) { bs.putInt(Float.floatToRawIntBits(x)); }
     }
 
     static class Latin1StringSchema implements Schema<String> {
@@ -355,11 +273,13 @@ public class Loader {
         public Latin1StringSchema(int maximumLength) { this.maximumLength = maximumLength; }
 
         @Override
-        public String read(long ptr, int sz) {
-            final char[] cs = new char[sz];
+        public String read(BitStream2 bs) {
+            bs.deeper();
+            final char[] cs = new char[bs.bytesToEnd()];
             for (int i = 0; i < cs.length; i++) {
-                cs[i] = (char)unsafe.getByte(ptr + i);
+                cs[i] = (char)bs.getByte();
             }
+            if (!bs.tryGetEnd()) throw new IllegalStateException("bytesToEnd() invariant violation");
             return new String(cs);
         }
 
@@ -379,45 +299,25 @@ public class Loader {
         }
 
         @Override
-        public void write(long ptr, int sz, String x) {
+        public void write(BitStream2 bs, String x) {
             if (maximumLength >= 0 && x.length() > maximumLength) {
                 throw new IllegalArgumentException("Supplied string " + x + " would be truncated to maximum size of " + maximumLength + " chars");
             }
 
+            bs.deeper();
             for (int i = 0; i < x.length(); i++) {
                 final char c = x.charAt(i);
-                unsafe.putByte(ptr + i, (byte)((int)c < 255 ? c : '?'));
+                bs.putByte((byte)((int)c < 255 ? c : '?'));
             }
+            bs.putEnd();
         }
 
     }
 
-    static class StringSchema implements Schema<String> {
+    static class StringSchema {
         private static final Charset UTF8 = Charset.forName("UTF-8");
 
-        public static StringSchema INSTANCE = new StringSchema();
-
-        private final Charset charset;
-        private final int maximumLength;
-
-        public StringSchema() { this(UTF8); }
-        public StringSchema(int maximumLength) { this(UTF8, maximumLength); }
-        public StringSchema(Charset charset) { this(charset, -1); }
-        public StringSchema(Charset charset, int maximumLength) {
-            this.charset = charset;
-            this.maximumLength = maximumLength;
-        }
-
-        public String read(long ptr, int sz) { return charset.decode(wrapPointer(ptr, sz)).toString(); }
-        public int fixedSize() { return -1; }
-        public int maximumSize() { return 4 * maximumLength; }
-        public int size(String x) { return charset.encode(x).remaining(); }
-        public void write(long ptr, int sz, String x) {
-            if (maximumLength >= 0 && x.length() > maximumLength) {
-                throw new IllegalArgumentException("Supplied string " + x + " would be truncated to maximum size of " + maximumLength + " chars");
-            }
-            wrapPointer(ptr, sz).put(charset.encode(x));
-        }
+        public static Schema<String> INSTANCE = ByteArraySchema.INSTANCE.map((String x) -> x.getBytes(UTF8), (byte[] xs) -> new String(xs, UTF8));
     }
 
     static class InstantSchema {
@@ -431,20 +331,26 @@ public class Loader {
     static class ByteArraySchema implements Schema<byte[]> {
         public static Schema<byte[]> INSTANCE = new ByteArraySchema();
 
-        public byte[] read(long ptr, int sz) {
-            final byte[] bs = new byte[sz];
-            for (int i = 0; i < sz; i++) bs[i] = unsafe.getByte(ptr + i);
-            return bs;
+        public byte[] read(BitStream2 bs) {
+            bs.deeper();
+            final byte[] xs = new byte[bs.bytesToEnd()];
+            for (int i = 0; i < xs.length; i++) {
+                xs[i] = bs.getByte();
+            }
+            if (!bs.tryGetEnd()) throw new IllegalStateException("bytesToEnd() invariant violation");
+            return xs;
         }
 
         public int fixedSize() { return -1; }
         public int maximumSize() { return -1; }
         public int size(byte[] x) { return x.length; }
 
-        public void write(long ptr, int sz, byte[] x) {
+        public void write(BitStream2 bs, byte[] x) {
+            bs.deeper();
             for (int i = 0; i < x.length; i++) {
-                unsafe.putByte(ptr + i, x[i]);
+                bs.putByte(x[i]);
             }
+            bs.putEnd();
         }
     }
 
@@ -480,6 +386,7 @@ public class Loader {
         return buffer;
     }
 
+    // FIXME: pool BitStream2 instances
     static class Index<K, V> implements AutoCloseable {
         final Database db;
         final long dbi;
@@ -529,7 +436,7 @@ public class Loader {
         private static <T> void fillBufferPointerFromSchema(Schema<T> schema, long bufferPtr, int sz, T x) {
             fillBufferPointerSizeFromSchema(schema, bufferPtr, sz);
             unsafe.putAddress(bufferPtr + Unsafe.ADDRESS_SIZE, bufferPtr + 2 * Unsafe.ADDRESS_SIZE);
-            schema.write(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, sz, x);
+            schema.write(new BitStream2(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, sz), x);
         }
 
         private static long allocateBufferPointer(long bufferPtr, int sz) {
@@ -569,7 +476,7 @@ public class Loader {
             fillBufferPointerSizeFromSchema(vSchema, vBufferPtrNow, vSz);
             try {
                 Util.checkErrorCode(JNI.mdb_put_raw(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
-                vSchema.write(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz, v);
+                vSchema.write(new BitStream2(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz), v);
             } finally {
                 freeBufferPointer(vBufferPtr, vBufferPtrNow);
                 freeBufferPointer(kBufferPtr, kBufferPtrNow);
@@ -606,7 +513,7 @@ public class Loader {
                     return null;
                 } else {
                     Util.checkErrorCode(rc);
-                    return vSchema.read(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(vBufferPtrNow));
+                    return vSchema.read(new BitStream2(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(vBufferPtrNow)));
                 }
             } finally {
                 freeBufferPointer(vBufferPtr, vBufferPtrNow);
@@ -694,6 +601,7 @@ public class Loader {
     }
 
     // TODO: duplicate item support
+    // FIXME: pool BitStream2 instances
     static class Cursor<K, V> implements AutoCloseable {
         final Index<K, V> index;
         final long cursor;
@@ -788,12 +696,12 @@ public class Loader {
 
         public K getKey() {
             if (bufferPtrStale) { refresh(); }
-            return index.kSchema.read(unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr));
+            return index.kSchema.read(new BitStream2(unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr)));
         }
 
         public V getValue() {
             if (bufferPtrStale) { refresh(); }
-            return index.vSchema.read(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE));
+            return index.vSchema.read(new BitStream2(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE)));
         }
 
         public void put(V v) {
@@ -803,7 +711,7 @@ public class Loader {
 
             unsafe.putAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, vSz);
             Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, JNI.MDB_CURRENT | JNI.MDB_RESERVE));
-            index.vSchema.write(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), vSz, v);
+            index.vSchema.write(new BitStream2(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), vSz), v);
 
             bufferPtrStale = false;
         }
@@ -819,7 +727,7 @@ public class Loader {
             Index.fillBufferPointerSizeFromSchema(index.vSchema, vBufferPtrNow, vSz);
             try {
                 Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
-                index.vSchema.write(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz, v);
+                index.vSchema.write(new BitStream2(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz), v);
             } finally {
                 Index.freeBufferPointer(index.vBufferPtr, vBufferPtrNow);
                 Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
