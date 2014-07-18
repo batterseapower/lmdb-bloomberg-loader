@@ -2,6 +2,20 @@ package uk.co.omegaprime;
 
 import static uk.co.omegaprime.Bits.*;
 
+// Unfortunately this is a stupid thing to do. Consider a composite primary key of three
+// elements: A, B and C. Now consider the cost of encoding them as ((A, B), C) and
+// (A, (B, C)) using this library:
+//
+// len(A) | len(B) | len(C) | Cost (bits), left nested  | Cost (bits), right nested
+// 0        0        N                2 +         1 + N           1 +         1 + N
+// 0        1        N                2 + 1 + 8 + 1 + N           1 + 1 + 8 + 1 + N
+// 1        0        N        2 + 8 + 2 +         1 + N   1 + 8 + 1 +         1 + N
+// 1        1        N        2 + 8 + 2 + 1 + 8 + 1 + N   1 + 8 + 1 + 1 + 8 + 1 + N
+//
+// Right nested is at least no worse than left nested, so the whole variable depth idea
+// of this class is actually harmful.
+//
+// For this reason I moved to BitStream2 where there is at most 1 bit of waste per byte.
 public class BitStream {
     // INVARIANT: ptr <= endPtr
     private long ptr;
