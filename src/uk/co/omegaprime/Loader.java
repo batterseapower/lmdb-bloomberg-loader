@@ -254,14 +254,43 @@ public class Loader {
         public void write(BitStream2 bs, Long x) { bs.putLong(x); }
     }
 
+    // FIXME: apply sign swapping
     static class FloatSchema implements Schema<Float> {
         public static FloatSchema INSTANCE = new FloatSchema();
 
-        public Float read(BitStream2 bs) { return Float.intBitsToFloat(bs.getInt()); }
+        // This sign-swapping magic is due to HBase's OrderedBytes class (and from Orderly before that)
+        private int toDB(int l) {
+            return l ^ ((l >> Integer.SIZE - 1) | Integer.MIN_VALUE);
+        }
+
+        private int fromDB(int l) {
+            return l ^ ((~l >> Integer.SIZE - 1) | Integer.MIN_VALUE);
+        }
+
+        public Float read(BitStream2 bs) { return Float.intBitsToFloat(fromDB(bs.getInt())); }
         public int fixedSize() { return Float.BYTES; }
         public int maximumSize() { return fixedSize(); }
         public int size(Float x) { return fixedSize(); }
-        public void write(BitStream2 bs, Float x) { bs.putInt(Float.floatToRawIntBits(x)); }
+        public void write(BitStream2 bs, Float x) { bs.putInt(toDB(Float.floatToRawIntBits(x))); }
+    }
+
+    static class DoubleSchema implements Schema<Double> {
+        public static DoubleSchema INSTANCE = new DoubleSchema();
+
+        // This sign-swapping magic is due to HBase's OrderedBytes class (and from Orderly before that)
+        private long toDB(long l) {
+            return l ^ ((l >> Long.SIZE - 1) | Long.MIN_VALUE);
+        }
+
+        private long fromDB(long l) {
+            return l ^ ((~l >> Long.SIZE - 1) | Long.MIN_VALUE);
+        }
+
+        public Double read(BitStream2 bs) { return Double.longBitsToDouble(fromDB(bs.getLong())); }
+        public int fixedSize() { return Double.BYTES; }
+        public int maximumSize() { return fixedSize(); }
+        public int size(Double x) { return fixedSize(); }
+        public void write(BitStream2 bs, Double x) { bs.putLong(toDB(Double.doubleToRawLongBits(x))); }
     }
 
     static class Latin1StringSchema implements Schema<String> {

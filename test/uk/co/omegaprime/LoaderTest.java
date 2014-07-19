@@ -32,7 +32,7 @@ public class LoaderTest {
     }
 
     @Test
-    public void canStoreFloats() {
+    public void canCursorAroundPositiveFloatsAndNaNs() {
         try (final Database db = createDatabase()) {
             try (final Transaction tx = db.transaction(false)) {
                 final Index<Float, String> index = db.createIndex(tx, "Test", FloatSchema.INSTANCE, StringSchema.INSTANCE);
@@ -123,6 +123,46 @@ public class LoaderTest {
                 index.put(tx, 100000000l, "Big");
 
                 assertEquals(Arrays.asList(-100000000l, -1l, 1l, 100000000l), iteratorToList(index.keys(tx)));
+
+                tx.commit();
+            }
+        }
+    }
+
+    @Test
+    public void canStoreFloats() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<Float, String> index = db.createIndex(tx, "Test", FloatSchema.INSTANCE, StringSchema.INSTANCE);
+
+                index.put(tx, Float.NEGATIVE_INFINITY, "Neg Inf");
+                index.put(tx, -100000000.0f, "Neg Big");
+                index.put(tx, -1.0f, "Neg One");
+                index.put(tx, 1.0f, "One");
+                index.put(tx, 100000000.0f, "Big");
+                index.put(tx, Float.POSITIVE_INFINITY, "Neg Inf");
+
+                assertEquals(Arrays.asList(Float.NEGATIVE_INFINITY, -100000000.0f, -1.0f, 1.0f, 100000000.0f, Float.POSITIVE_INFINITY), iteratorToList(index.keys(tx)));
+
+                tx.commit();
+            }
+        }
+    }
+
+    @Test
+    public void canStoreDoubles() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<Double, String> index = db.createIndex(tx, "Test", DoubleSchema.INSTANCE, StringSchema.INSTANCE);
+
+                index.put(tx, Double.NEGATIVE_INFINITY, "Neg Inf");
+                index.put(tx, -100000000.0, "Neg Big");
+                index.put(tx, -1.0, "Neg One");
+                index.put(tx, 1.0, "One");
+                index.put(tx, 100000000.0, "Big");
+                index.put(tx, Double.POSITIVE_INFINITY, "Neg Inf");
+
+                assertEquals(Arrays.asList(Double.NEGATIVE_INFINITY, -100000000.0, -1.0, 1.0, 100000000.0, Double.POSITIVE_INFINITY), iteratorToList(index.keys(tx)));
 
                 tx.commit();
             }
