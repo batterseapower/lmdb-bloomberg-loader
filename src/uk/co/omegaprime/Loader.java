@@ -150,11 +150,6 @@ public class Loader {
                 }
 
                 @Override
-                public int fixedSize() {
-                    return (leftSchema.fixedSize() >= 0 && rightSchema.fixedSize() >= 0) ? leftSchema.fixedSize() + rightSchema.fixedSize() : -1;
-                }
-
-                @Override
                 public int maximumSize() {
                     return (leftSchema.maximumSize() >= 0 && rightSchema.maximumSize() >= 0) ? Math.max(leftSchema.maximumSize(), rightSchema.maximumSize()) : -1;
                 }
@@ -173,7 +168,6 @@ public class Loader {
         }
 
         T read(BitStream2 bs);
-        int fixedSize();
         int maximumSize();
         int size(T x);
         void write(BitStream2 bs, T x);
@@ -183,10 +177,6 @@ public class Loader {
             return new Schema<U>() {
                 public U read(BitStream2 bs) {
                     return g.apply(parent.read(bs));
-                }
-
-                public int fixedSize() {
-                    return parent.fixedSize();
                 }
 
                 public int maximumSize() {
@@ -208,9 +198,8 @@ public class Loader {
         public static VoidSchema INSTANCE = new VoidSchema();
 
         public Void read(BitStream2 bs) { return null; }
-        public int fixedSize() { return 0; }
-        public int maximumSize() { return fixedSize(); }
-        public int size(Void x) { return fixedSize(); }
+        public int maximumSize() { return 0; }
+        public int size(Void x) { return maximumSize(); }
         public void write(BitStream2 bs, Void x) { }
     }
 
@@ -218,9 +207,8 @@ public class Loader {
         public static IntegerSchema INSTANCE = new IntegerSchema();
 
         public Integer read(BitStream2 bs) { return swapSign(bs.getInt()); }
-        public int fixedSize() { return Integer.BYTES; }
-        public int maximumSize() { return fixedSize(); }
-        public int size(Integer x) { return fixedSize(); }
+        public int maximumSize() { return Integer.BYTES; }
+        public int size(Integer x) { return maximumSize(); }
         public void write(BitStream2 bs, Integer x) { bs.putInt(swapSign(x)); }
     }
 
@@ -228,9 +216,8 @@ public class Loader {
         public static UnsignedIntegerSchema INSTANCE = new UnsignedIntegerSchema();
 
         public Integer read(BitStream2 bs) { return bs.getInt(); }
-        public int fixedSize() { return Long.BYTES; }
-        public int maximumSize() { return fixedSize(); }
-        public int size(Integer x) { return fixedSize(); }
+        public int maximumSize() { return Long.BYTES; }
+        public int size(Integer x) { return maximumSize(); }
         public void write(BitStream2 bs, Integer x) { bs.putInt(x); }
     }
 
@@ -238,9 +225,8 @@ public class Loader {
         public static LongSchema INSTANCE = new LongSchema();
 
         public Long read(BitStream2 bs) { return swapSign(bs.getLong()); }
-        public int fixedSize() { return Long.BYTES; }
-        public int maximumSize() { return fixedSize(); }
-        public int size(Long x) { return fixedSize(); }
+        public int maximumSize() { return Long.BYTES; }
+        public int size(Long x) { return maximumSize(); }
         public void write(BitStream2 bs, Long x) { bs.putLong(swapSign(x)); }
     }
 
@@ -248,9 +234,8 @@ public class Loader {
         public static UnsignedLongSchema INSTANCE = new UnsignedLongSchema();
 
         public Long read(BitStream2 bs) { return bs.getLong(); }
-        public int fixedSize() { return Long.BYTES; }
-        public int maximumSize() { return fixedSize(); }
-        public int size(Long x) { return fixedSize(); }
+        public int maximumSize() { return Long.BYTES; }
+        public int size(Long x) { return maximumSize(); }
         public void write(BitStream2 bs, Long x) { bs.putLong(x); }
     }
 
@@ -268,9 +253,8 @@ public class Loader {
         }
 
         public Float read(BitStream2 bs) { return Float.intBitsToFloat(fromDB(bs.getInt())); }
-        public int fixedSize() { return Float.BYTES; }
-        public int maximumSize() { return fixedSize(); }
-        public int size(Float x) { return fixedSize(); }
+        public int maximumSize() { return Float.BYTES; }
+        public int size(Float x) { return maximumSize(); }
         public void write(BitStream2 bs, Float x) { bs.putInt(toDB(Float.floatToRawIntBits(x))); }
     }
 
@@ -287,9 +271,8 @@ public class Loader {
         }
 
         public Double read(BitStream2 bs) { return Double.longBitsToDouble(fromDB(bs.getLong())); }
-        public int fixedSize() { return Double.BYTES; }
-        public int maximumSize() { return fixedSize(); }
-        public int size(Double x) { return fixedSize(); }
+        public int maximumSize() { return Double.BYTES; }
+        public int size(Double x) { return maximumSize(); }
         public void write(BitStream2 bs, Double x) { bs.putLong(toDB(Double.doubleToRawLongBits(x))); }
     }
 
@@ -310,11 +293,6 @@ public class Loader {
             }
             if (!bs.tryGetEnd()) throw new IllegalStateException("bytesToEnd() invariant violation");
             return new String(cs);
-        }
-
-        @Override
-        public int fixedSize() {
-            return -1;
         }
 
         @Override
@@ -370,7 +348,6 @@ public class Loader {
             return xs;
         }
 
-        public int fixedSize() { return -1; }
         public int maximumSize() { return -1; }
         public int size(byte[] x) { return x.length; }
 
@@ -441,11 +418,7 @@ public class Loader {
                 // TODO: speculatively allocate a reasonable amount of memory that most allocations of interest might fit into?
                 return 0;
             } else {
-                long bufferPtr = allocateBufferPointer(0, schema.maximumSize());
-                if (schema.fixedSize() >= 0) {
-                    unsafe.putAddress(bufferPtr, schema.fixedSize());
-                }
-                return bufferPtr;
+                return allocateBufferPointer(0, schema.maximumSize());
             }
         }
 
@@ -456,9 +429,7 @@ public class Loader {
         }
 
         private static <T> void fillBufferPointerSizeFromSchema(Schema<T> schema, long bufferPtr, int sz) {
-            if (schema.fixedSize() < 0) {
-                unsafe.putAddress(bufferPtr, sz);
-            }
+            unsafe.putAddress(bufferPtr, sz);
         }
 
         // INVARIANT: sz == schema.size(x)
