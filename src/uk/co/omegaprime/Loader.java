@@ -239,7 +239,6 @@ public class Loader {
         public void write(BitStream2 bs, Long x) { bs.putLong(x); }
     }
 
-    // FIXME: apply sign swapping
     static class FloatSchema implements Schema<Float> {
         public static FloatSchema INSTANCE = new FloatSchema();
 
