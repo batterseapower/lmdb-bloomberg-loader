@@ -82,8 +82,8 @@ public class Loader {
         }
 
         public void setMetaSync(boolean enabled) { Util.checkErrorCode(JNI.mdb_env_set_flags(env, JNI.MDB_NOMETASYNC, enabled ? 0 : 1)); }
-        public void setSync    (boolean enabled) { Util.checkErrorCode(JNI.mdb_env_set_flags(env, JNI.MDB_NOSYNC, enabled ? 0 : 1)); }
-        public void setMapSync (boolean enabled) { Util.checkErrorCode(JNI.mdb_env_set_flags(env, JNI.MDB_MAPASYNC, enabled ? 0 : 1)); }
+        public void setSync    (boolean enabled) { Util.checkErrorCode(JNI.mdb_env_set_flags(env, JNI.MDB_NOSYNC,     enabled ? 0 : 1)); }
+        public void setMapSync (boolean enabled) { Util.checkErrorCode(JNI.mdb_env_set_flags(env, JNI.MDB_MAPASYNC,   enabled ? 0 : 1)); }
 
         public void sync(boolean force) { Util.checkErrorCode(JNI.mdb_env_sync(env, force ? 1 : 0)); }
 
@@ -353,8 +353,8 @@ public class Loader {
 
         public void write(BitStream2 bs, byte[] x) {
             bs.deeper();
-            for (int i = 0; i < x.length; i++) {
-                bs.putByte(x[i]);
+            for (byte aX : x) {
+                bs.putByte(aX);
             }
             bs.putEnd();
         }
@@ -428,13 +428,9 @@ public class Loader {
             }
         }
 
-        private static <T> void fillBufferPointerSizeFromSchema(Schema<T> schema, long bufferPtr, int sz) {
-            unsafe.putAddress(bufferPtr, sz);
-        }
-
         // INVARIANT: sz == schema.size(x)
         private static <T> void fillBufferPointerFromSchema(Schema<T> schema, long bufferPtr, int sz, T x) {
-            fillBufferPointerSizeFromSchema(schema, bufferPtr, sz);
+            unsafe.putAddress(bufferPtr, sz);
             unsafe.putAddress(bufferPtr + Unsafe.ADDRESS_SIZE, bufferPtr + 2 * Unsafe.ADDRESS_SIZE);
             schema.write(new BitStream2(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, sz), x);
         }
@@ -443,8 +439,7 @@ public class Loader {
             if (bufferPtr != 0) {
                 return bufferPtr;
             } else {
-                final long bufferPtrNow = unsafe.allocateMemory(2 * Unsafe.ADDRESS_SIZE + sz);
-                return bufferPtrNow;
+                return unsafe.allocateMemory(2 * Unsafe.ADDRESS_SIZE + sz);
             }
         }
 
@@ -457,7 +452,7 @@ public class Loader {
         public Cursor<K, V> createCursor(Transaction tx) {
             final long[] cursorPtr = new long[1];
             Util.checkErrorCode(JNI.mdb_cursor_open(tx.txn, dbi, cursorPtr));
-            return new Cursor<K, V>(this, cursorPtr[0]);
+            return new Cursor<>(this, cursorPtr[0]);
         }
 
         public void close() {
@@ -473,7 +468,7 @@ public class Loader {
             final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
             fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
             final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, vSz);
-            fillBufferPointerSizeFromSchema(vSchema, vBufferPtrNow, vSz);
+            unsafe.putAddress(vBufferPtrNow, vSz);
             try {
                 Util.checkErrorCode(JNI.mdb_put_raw(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
                 vSchema.write(new BitStream2(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz), v);
@@ -724,7 +719,7 @@ public class Loader {
             final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
             Index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
             final long vBufferPtrNow = Index.allocateBufferPointer(index.vBufferPtr, vSz);
-            Index.fillBufferPointerSizeFromSchema(index.vSchema, vBufferPtrNow, vSz);
+            unsafe.putAddress(vBufferPtrNow, vSz);
             try {
                 Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
                 index.vSchema.write(new BitStream2(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz), v);
