@@ -1,17 +1,26 @@
 package uk.co.omegaprime;
 
 import static uk.co.omegaprime.Bits.bigEndian;
-import static uk.co.omegaprime.Bits.unsafe;
 
 public class BitStream2 {
     private long ptr;
     private long endPtr;
-    private byte bitOffset = 0;
-    private int depth = 0;
+    private byte bitOffset;
+    private int depth;
+
+    public BitStream2() {
+        this(0, 0);
+    }
 
     public BitStream2(long ptr, int sz) {
+        initialize(ptr, sz);
+    }
+
+    public void initialize(long ptr, int sz) {
         this.ptr = ptr;
         this.endPtr = ptr + sz;
+        this.bitOffset = 0;
+        this.depth = 0;
     }
 
     public void deeper() {
@@ -52,23 +61,23 @@ public class BitStream2 {
         } else {
             int count = -1;
             boolean isEnd;
-            long ptrPrime = ptr;
-            byte bitOffsetPrime = bitOffset;
+            long ptrNew = ptr;
+            byte bitOffsetNew = bitOffset;
             do {
                 count++;
 
-                if (bitOffsetPrime == 0) {
-                    isEnd = (Bits.unsafe.getByte(ptrPrime - 1) & 1) == 0;
+                if (bitOffsetNew == 0) {
+                    isEnd = (Bits.unsafe.getByte(ptrNew - 1) & 1) == 0;
                 } else {
-                    isEnd = ((Bits.unsafe.getByte(ptrPrime) << (bitOffsetPrime - 1)) & 0x80) == 0;
+                    isEnd = ((Bits.unsafe.getByte(ptrNew) << (bitOffsetNew - 1)) & 0x80) == 0;
                 }
 
-                if (bitOffsetPrime == 7) {
-                    bitOffsetPrime = 0;
-                    ptrPrime += 2;
+                if (bitOffsetNew == 7) {
+                    bitOffsetNew = 0;
+                    ptrNew += 2;
                 } else {
-                    bitOffsetPrime++;
-                    ptrPrime++;
+                    bitOffsetNew++;
+                    ptrNew++;
                 }
             } while (!isEnd);
 

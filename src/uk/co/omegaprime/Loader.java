@@ -391,7 +391,6 @@ public class Loader {
         return buffer;
     }
 
-    // FIXME: pool BitStream2 instances
     static class Index<K, V> implements AutoCloseable {
         final Database db;
         final long dbi;
@@ -401,6 +400,7 @@ public class Loader {
         // Used for temporary scratch storage within the context of a single method only, basically
         // just to save some calls to the allocator. The sole reason why Index is not thread safe.
         final long kBufferPtr, vBufferPtr;
+        final BitStream2 bs = new BitStream2();
 
         Index(Database db, long dbi, Schema<K> kSchema, Schema<V> vSchema) {
             this.db = db;
@@ -428,10 +428,11 @@ public class Loader {
         }
 
         // INVARIANT: sz == schema.size(x)
-        private static <T> void fillBufferPointerFromSchema(Schema<T> schema, long bufferPtr, int sz, T x) {
+        private <T> void fillBufferPointerFromSchema(Schema<T> schema, long bufferPtr, int sz, T x) {
             unsafe.putAddress(bufferPtr, sz);
             unsafe.putAddress(bufferPtr + Unsafe.ADDRESS_SIZE, bufferPtr + 2 * Unsafe.ADDRESS_SIZE);
-            schema.write(new BitStream2(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, sz), x);
+            bs.initialize(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, sz);
+            schema.write(bs, x);
         }
 
         private static long allocateBufferPointer(long bufferPtr, int sz) {
@@ -595,7 +596,6 @@ public class Loader {
     }
 
     // TODO: duplicate item support
-    // FIXME: pool BitStream2 instances
     static class Cursor<K, V> implements AutoCloseable {
         final Index<K, V> index;
         final long cursor;
@@ -607,7 +607,6 @@ public class Loader {
         // will have to call move(JNI.MDB_GET_CURRENT) to correct this situation. An alternative to
         // having the bufferPtrStale flag would be to just call this eagerly whenever the buffer goes
         // stale, but I kind of like the idea of avoiding the JNI call (though TBH it doesn't seem to
-
         final long bufferPtr;
         boolean bufferPtrStale;
 
@@ -644,7 +643,7 @@ public class Loader {
             final int kSz = index.kSchema.size(k);
 
             final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
-            Index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
             try {
                 return isFound(JNI.mdb_cursor_get_so_raw_it_hurts(cursor, kBufferPtrNow, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, op));
             } finally {
@@ -672,7 +671,7 @@ public class Loader {
             }
 
             final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
-            Index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
             try {
                 final long ourKeyPtr   = unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE);
                 final long theirKeyPtr = kBufferPtrNow + 2 * Unsafe.ADDRESS_SIZE;
@@ -690,12 +689,14 @@ public class Loader {
 
         public K getKey() {
             if (bufferPtrStale) { refresh(); }
-            return index.kSchema.read(new BitStream2(unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr)));
+            index.bs.initialize(unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr));
+            return index.kSchema.read(index.bs);
         }
 
         public V getValue() {
             if (bufferPtrStale) { refresh(); }
-            return index.vSchema.read(new BitStream2(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE)));
+            index.bs.initialize(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE));
+            return index.vSchema.read(index.bs);
         }
 
         public void put(V v) {
@@ -705,7 +706,8 @@ public class Loader {
 
             unsafe.putAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, vSz);
             Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, JNI.MDB_CURRENT | JNI.MDB_RESERVE));
-            index.vSchema.write(new BitStream2(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), vSz), v);
+            index.bs.initialize(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), vSz);
+            index.vSchema.write(index.bs, v);
 
             bufferPtrStale = false;
         }
@@ -716,7 +718,7 @@ public class Loader {
             final int vSz = index.vSchema.size(v);
 
             final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
-            Index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
             final long vBufferPtrNow = Index.allocateBufferPointer(index.vBufferPtr, vSz);
             unsafe.putAddress(vBufferPtrNow, vSz);
             try {
