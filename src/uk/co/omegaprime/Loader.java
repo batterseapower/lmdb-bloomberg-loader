@@ -167,6 +167,40 @@ public class Loader {
             };
         }
 
+        public static <T> Schema<T> nullable(Schema<T> schema) {
+            return new Schema<T>() {
+                @Override
+                public T read(BitStream2 bs) {
+                    bs.deeper();
+                    if (bs.tryGetEnd()) {
+                        return null;
+                    } else {
+                        T result = schema.read(bs);
+                        // FIXME: why should we have to pay 2 bits rather than 1?
+                        if (!bs.tryGetEnd()) throw new IllegalStateException("Impossible: corrupt data in nullable column?");
+                        return result;
+                    }
+                }
+
+                @Override
+                public int maximumSize() {
+                    return schema.maximumSize();
+                }
+
+                @Override
+                public int size(T x) {
+                    return schema.size(x);
+                }
+
+                @Override
+                public void write(BitStream2 bs, T x) {
+                    bs.deeper();
+                    schema.write(bs, x);
+                    bs.putEnd();
+                }
+            };
+        }
+
         T read(BitStream2 bs);
         int maximumSize();
         int size(T x);
@@ -595,6 +629,7 @@ public class Loader {
         }
     }
 
+    // FIXME: type specialisation for true 0-allocation?
     // TODO: duplicate item support
     static class Cursor<K, V> implements AutoCloseable {
         final Index<K, V> index;
