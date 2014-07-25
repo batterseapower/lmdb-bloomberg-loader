@@ -629,6 +629,8 @@ public class Loader {
         }
     }
 
+    // FIXME: we can detect the end of level 0 implicitly, why should we pay to store e.g. a single string?
+    // This literally ONLY works in the tail position. You can't even have a variable length thing followed by a fixed length.
     // FIXME: type specialisation for true 0-allocation?
     // TODO: duplicate item support
     static class Cursor<K, V> implements AutoCloseable {
@@ -813,7 +815,7 @@ public class Loader {
         }
         dbDirectory.mkdir();
 
-        try (final Database db = new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1_073_741_824))) {
+        try (final Database db = new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1024*1024*1024))) {
             try (final Transaction tx = db.transaction(false)) {
                 final Index<File, Source> sourcesIndex = db.<File, Source>createIndex(tx, "Sources", StringSchema.INSTANCE.map(File::getAbsolutePath, File::new),
                                                                                                      InstantSchema.INSTANCE_SECOND_RESOLUTION.map(Source::getInstant, Source::new));
