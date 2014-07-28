@@ -364,7 +364,7 @@ public class Loader {
     static class StringSchema {
         private static final Charset UTF8 = Charset.forName("UTF-8");
 
-        // TODO: due to the structure of UTF-8 it's actually possible to have less overhead than this
+        // XXX: due to the structure of UTF-8 it's actually possible to have less overhead than this
         public static Schema<String> INSTANCE = ByteArraySchema.INSTANCE.map((String x) -> x.getBytes(UTF8), (byte[] xs) -> new String(xs, UTF8));
     }
 
@@ -406,7 +406,7 @@ public class Loader {
         }
     }
 
-    // TODO: should this be the default?
+    // XXX: should this be the default?
     static class NullFreeStringSchema implements Schema<String> {
         public static NullFreeStringSchema INSTANCE = new NullFreeStringSchema();
 
@@ -748,7 +748,7 @@ public class Loader {
         }
     }
 
-    // TODO: type specialisation for true 0-allocation? But we might hope that escape analysis would save us because our boxes are intermediate only.
+    // XXX: type specialisation for true 0-allocation? But we might hope that escape analysis would save us because our boxes are intermediate only.
     // TODO: duplicate item support
     static class Cursor<K, V> implements AutoCloseable {
         final Index<K, V> index;
