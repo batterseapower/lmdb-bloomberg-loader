@@ -197,7 +197,7 @@ public class LoaderTest {
     public void unsignedIntegerSchemaStoresCorrectOrdering() {
         final long ptr = unsafe.allocateMemory(Integer.BYTES);
         try {
-            UnsignedIntegerSchema.INSTANCE.write(new BitStream2(ptr, Integer.BYTES), 0, 0xCAFEBABE);
+            UnsignedIntegerSchema.INSTANCE.write(new BitStream3(ptr, Integer.BYTES), 0xCAFEBABE);
             assertEquals((byte)0xCA, unsafe.getByte(ptr + 0));
             assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
             assertEquals((byte)0xBE, unsafe.getByte(ptr + Integer.BYTES - 1));
@@ -210,7 +210,7 @@ public class LoaderTest {
     public void integerSchemaStoresCorrectOrdering() {
         final long ptr = unsafe.allocateMemory(Integer.BYTES);
         try {
-            IntegerSchema.INSTANCE.write(new BitStream2(ptr, Integer.BYTES), 0, 0xCAFEBABE);
+            IntegerSchema.INSTANCE.write(new BitStream3(ptr, Integer.BYTES), 0xCAFEBABE);
             // 0xC = 12 = 1010b ==> 0010b = 0x4
             assertEquals((byte)0x4A, unsafe.getByte(ptr + 0));
             assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
@@ -224,7 +224,7 @@ public class LoaderTest {
     public void unsignedLongSchemaStoresCorrectOrdering() {
         final long ptr = unsafe.allocateMemory(Long.BYTES);
         try {
-            UnsignedLongSchema.INSTANCE.write(new BitStream2(ptr, Long.BYTES), 0, 0xCAFEBABEDEADBEEFl);
+            UnsignedLongSchema.INSTANCE.write(new BitStream3(ptr, Long.BYTES), 0xCAFEBABEDEADBEEFl);
             assertEquals((byte)0xCA, unsafe.getByte(ptr + 0));
             assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
             assertEquals((byte)0xEF, unsafe.getByte(ptr + Long.BYTES - 1));
@@ -237,7 +237,7 @@ public class LoaderTest {
     public void longSchemaStoresCorrectOrdering() {
         final long ptr = unsafe.allocateMemory(Long.BYTES);
         try {
-            LongSchema.INSTANCE.write(new BitStream2(ptr, Long.BYTES), 0, 0xCAFEBABEDEADBEEFl);
+            LongSchema.INSTANCE.write(new BitStream3(ptr, Long.BYTES), 0xCAFEBABEDEADBEEFl);
             // 0xC = 12 = 1010b ==> 0010b = 0x4
             assertEquals((byte)0x4A, unsafe.getByte(ptr + 0));
             assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));

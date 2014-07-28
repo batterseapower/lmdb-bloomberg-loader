@@ -27,4 +27,8 @@ public class Bits {
 
     public static int swapSign(int x) { return (x & 0x7FFFFFFF) | (~x & 0x80000000); }
     public static long swapSign(long x) { return (x & 0x7FFFFFFFFFFFFFFFl) | (~x & 0x8000000000000000l); }
+
+    public static int bitsToBytes(int bits) {
+        return bits / 8 + (bits % 8 != 0 ? 1 : 0);
+    }
 }

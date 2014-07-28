@@ -145,8 +145,8 @@ public class Loader {
         public static <T, U, V> Schema<V> zipWith(Schema<T> leftSchema, Function<V, T> leftProj, Schema<U> rightSchema, Function<V, U> rightProj, BiFunction<T, U, V> f) {
             return new Schema<V>() {
                 @Override
-                public V read(BitStream3 bs, int trailingDataBytes) {
-                    return f.apply(leftSchema.read(bs, rightSchema.maximumSizeBits() == 0 ? trailingDataBytes : -1), rightSchema.read(bs, trailingDataBytes));
+                public V read(BitStream3 bs) {
+                    return f.apply(leftSchema.read(bs), rightSchema.read(bs));
                 }
 
                 @Override
@@ -155,30 +155,27 @@ public class Loader {
                 }
 
                 @Override
-                public int sizeBits(V x, int trailingDataBytes) {
-                    return leftSchema.sizeBits(leftProj.apply(x), rightSchema.maximumSizeBits() == 0 ? trailingDataBytes : -1) + rightSchema.sizeBits(rightProj.apply(x), trailingDataBytes);
+                public int sizeBits(V x) {
+                    return leftSchema.sizeBits(leftProj.apply(x)) + rightSchema.sizeBits(rightProj.apply(x));
                 }
 
                 @Override
-                public void write(BitStream3 bs, int trailingDataBytes, V x) {
-                    leftSchema.write (bs, rightSchema.maximumSizeBits() == 0 ? trailingDataBytes : -1, leftProj .apply(x));
-                    rightSchema.write(bs, trailingDataBytes,                                           rightProj.apply(x));
+                public void write(BitStream3 bs, V x) {
+                    leftSchema.write (bs, leftProj .apply(x));
+                    rightSchema.write(bs, rightProj.apply(x));
                 }
             };
         }
 
-        // FIXME: I don't think that the trailingDataBytes stuff works. Consider nullable(VoidSchema.INSTANCE)
-        // at the top level. Both "null" and "Void" will be serialized as 0 bits and so are indistinguishable.
-        // This also applies if the thing inside the nullable is of sub-byte length (e.g. another nullable or
-        // None branch of an option type)
+        // FIXME: null-free string schema
         public static <T> Schema<T> nullable(Schema<T> schema) {
             return new Schema<T>() {
                 @Override
-                public T read(BitStream3 bs, int trailingDataBytes) {
-                    if (trailingDataBytes < 0 ? !bs.getBoolean() : (bs.remainingBytes() - trailingDataBytes) <= 0) {
+                public T read(BitStream3 bs) {
+                    if (!bs.getBoolean()) {
                         return null;
                     } else {
-                        return schema.read(bs, trailingDataBytes);
+                        return schema.read(bs);
                     }
                 }
 
@@ -188,45 +185,44 @@ public class Loader {
                 }
 
                 @Override
-                public int sizeBits(T x, int trailingDataBytes) {
-                    final int rawSizeBits = x == null ? 0 : schema.sizeBits(x, trailingDataBytes);
-                    return trailingDataBytes >= 0 ? rawSizeBits : 1 + rawSizeBits;
+                public int sizeBits(T x) {
+                    return 1 + (x == null ? 0 : schema.sizeBits(x));
                 }
 
                 @Override
-                public void write(BitStream3 bs, int trailingDataBytes, T x) {
+                public void write(BitStream3 bs, T x) {
                     if (x == null) {
-                        if (trailingDataBytes < 0) bs.putBoolean(false);
+                        bs.putBoolean(false);
                     } else {
-                        if (trailingDataBytes < 0) bs.putBoolean(true);
-                        schema.write(bs, trailingDataBytes, x);
+                        bs.putBoolean(true);
+                        schema.write(bs, x);
                     }
                 }
             };
         }
 
-        T read(BitStream3 bs, int trailingDataBytes);
+        T read(BitStream3 bs);
         int maximumSizeBits();
-        int sizeBits(T x, int trailingDataBytes);
-        void write(BitStream3 bs, int trailingDataBytes, T x);
+        int sizeBits(T x);
+        void write(BitStream3 bs, T x);
 
         default <U> Schema<U> map(Function<U, T> f, Function<T, U> g) {
             final Schema<T> parent = this;
             return new Schema<U>() {
-                public U read(BitStream3 bs, int trailingDataBytes) {
-                    return g.apply(parent.read(bs, trailingDataBytes));
+                public U read(BitStream3 bs) {
+                    return g.apply(parent.read(bs));
                 }
 
                 public int maximumSizeBits() {
                     return parent.maximumSizeBits();
                 }
 
-                public int sizeBits(U x, int trailingDataBytes) {
-                    return parent.sizeBits(f.apply(x), trailingDataBytes);
+                public int sizeBits(U x) {
+                    return parent.sizeBits(f.apply(x));
                 }
 
-                public void write(BitStream3 bs, int trailingDataBytes, U x) {
-                    parent.write(bs, trailingDataBytes, f.apply(x));
+                public void write(BitStream3 bs, U x) {
+                    parent.write(bs, f.apply(x));
                 }
             };
         }
@@ -235,46 +231,46 @@ public class Loader {
     static class VoidSchema implements Schema<Void> {
         public static VoidSchema INSTANCE = new VoidSchema();
 
-        public Void read(BitStream2 bs, int trailingDataBytes) { return null; }
+        public Void read(BitStream3 bs) { return null; }
         public int maximumSizeBits() { return 0; }
-        public int sizeBits(Void x, int trailingDataBytes) { return maximumSizeBits(); }
-        public void write(BitStream2 bs, int trailingDataBytes, Void x) { }
+        public int sizeBits(Void x) { return maximumSizeBits(); }
+        public void write(BitStream3 bs, Void x) { }
     }
 
     static class IntegerSchema implements Schema<Integer> {
         public static IntegerSchema INSTANCE = new IntegerSchema();
 
-        public Integer read(BitStream2 bs, int trailingDataBytes) { return swapSign(bs.getInt()); }
+        public Integer read(BitStream3 bs) { return swapSign(bs.getInt()); }
         public int maximumSizeBits() { return Integer.BYTES * 8; }
-        public int sizeBits(Integer x, int trailingDataBytes) { return maximumSizeBits(); }
-        public void write(BitStream2 bs, int trailingDataBytes, Integer x) { bs.putInt(swapSign(x)); }
+        public int sizeBits(Integer x) { return maximumSizeBits(); }
+        public void write(BitStream3 bs, Integer x) { bs.putInt(swapSign(x)); }
     }
 
     static class UnsignedIntegerSchema implements Schema<Integer> {
         public static UnsignedIntegerSchema INSTANCE = new UnsignedIntegerSchema();
 
-        public Integer read(BitStream2 bs, int trailingDataBytes) { return bs.getInt(); }
+        public Integer read(BitStream3 bs) { return bs.getInt(); }
         public int maximumSizeBits() { return Integer.BYTES * 8; }
-        public int sizeBits(Integer x, int trailingDataBytes) { return maximumSizeBits(); }
-        public void write(BitStream2 bs, int trailingDataBytes, Integer x) { bs.putInt(x); }
+        public int sizeBits(Integer x) { return maximumSizeBits(); }
+        public void write(BitStream3 bs, Integer x) { bs.putInt(x); }
     }
 
     static class LongSchema implements Schema<Long> {
         public static LongSchema INSTANCE = new LongSchema();
 
-        public Long read(BitStream2 bs, int trailingDataBytes) { return swapSign(bs.getLong()); }
+        public Long read(BitStream3 bs) { return swapSign(bs.getLong()); }
         public int maximumSizeBits() { return Long.BYTES * 8; }
-        public int sizeBits(Long x, int trailingDataBytes) { return maximumSizeBits(); }
-        public void write(BitStream2 bs, int trailingDataBytes, Long x) { bs.putLong(swapSign(x)); }
+        public int sizeBits(Long x) { return maximumSizeBits(); }
+        public void write(BitStream3 bs, Long x) { bs.putLong(swapSign(x)); }
     }
 
     static class UnsignedLongSchema implements Schema<Long> {
         public static UnsignedLongSchema INSTANCE = new UnsignedLongSchema();
 
-        public Long read(BitStream2 bs, int trailingDataBytes) { return bs.getLong(); }
+        public Long read(BitStream3 bs) { return bs.getLong(); }
         public int maximumSizeBits() { return Long.BYTES * 8; }
-        public int sizeBits(Long x, int trailingDataBytes) { return maximumSizeBits(); }
-        public void write(BitStream2 bs, int trailingDataBytes, Long x) { bs.putLong(x); }
+        public int sizeBits(Long x) { return maximumSizeBits(); }
+        public void write(BitStream3 bs, Long x) { bs.putLong(x); }
     }
 
     static class FloatSchema implements Schema<Float> {
@@ -289,10 +285,10 @@ public class Loader {
             return l ^ ((~l >> Integer.SIZE - 1) | Integer.MIN_VALUE);
         }
 
-        public Float read(BitStream2 bs, int trailingDataBytes) { return Float.intBitsToFloat(fromDB(bs.getInt())); }
+        public Float read(BitStream3 bs) { return Float.intBitsToFloat(fromDB(bs.getInt())); }
         public int maximumSizeBits() { return Float.BYTES * 8; }
-        public int sizeBits(Float x, int trailingDataBytes) { return maximumSizeBits(); }
-        public void write(BitStream2 bs, int trailingDataBytes, Float x) { bs.putInt(toDB(Float.floatToRawIntBits(x))); }
+        public int sizeBits(Float x) { return maximumSizeBits(); }
+        public void write(BitStream3 bs, Float x) { bs.putInt(toDB(Float.floatToRawIntBits(x))); }
     }
 
     static class DoubleSchema implements Schema<Double> {
@@ -307,13 +303,12 @@ public class Loader {
             return l ^ ((~l >> Long.SIZE - 1) | Long.MIN_VALUE);
         }
 
-        public Double read(BitStream2 bs, int trailingDataBytes) { return Double.longBitsToDouble(fromDB(bs.getLong())); }
+        public Double read(BitStream3 bs) { return Double.longBitsToDouble(fromDB(bs.getLong())); }
         public int maximumSizeBits() { return Double.BYTES * 8; }
-        public int sizeBits(Double x, int trailingDataBytes) { return maximumSizeBits(); }
-        public void write(BitStream2 bs, int trailingDataBytes, Double x) { bs.putLong(toDB(Double.doubleToRawLongBits(x))); }
+        public int sizeBits(Double x) { return maximumSizeBits(); }
+        public void write(BitStream3 bs, Double x) { bs.putLong(toDB(Double.doubleToRawLongBits(x))); }
     }
 
-    // FIXME: size() of variable length schemas is wrong... (doesn't account for waste)
     static class Latin1StringSchema implements Schema<String> {
         public static Latin1StringSchema INSTANCE = new Latin1StringSchema();
 
@@ -323,13 +318,21 @@ public class Loader {
         public Latin1StringSchema(int maximumLength) { this.maximumLength = maximumLength; }
 
         @Override
-        public String read(BitStream2 bs, int trailingDataBytes) {
-            bs.deeper(trailingDataBytes);
-            final char[] cs = new char[bs.bytesToEnd(trailingDataBytes)];
+        public String read(BitStream3 bs) {
+            final long mark = bs.mark();
+            int count = 0;
+            while (bs.getBoolean()) {
+                count++;
+                bs.getByte();
+            }
+            bs.reset(mark);
+
+            final char[] cs = new char[count];
             for (int i = 0; i < cs.length; i++) {
+                assert(bs.getBoolean());
                 cs[i] = (char)bs.getByte();
             }
-            if (!bs.tryGetEnd(trailingDataBytes)) throw new IllegalStateException("bytesToEnd() invariant violation");
+            assert(!bs.getBoolean());
             return new String(cs);
         }
 
@@ -339,22 +342,22 @@ public class Loader {
         }
 
         @Override
-        public int sizeBits(String x, int trailingDataBytes) {
-            return trailingDataBytes >= 0 ? x.length() * 8 : x.length() * 9 + 1;
+        public int sizeBits(String x) {
+            return x.length() * 9 + 1;
         }
 
         @Override
-        public void write(BitStream2 bs, int trailingDataBytes, String x) {
+        public void write(BitStream3 bs, String x) {
             if (maximumLength >= 0 && x.length() > maximumLength) {
                 throw new IllegalArgumentException("Supplied string " + x + " would be truncated to maximum size of " + maximumLength + " chars");
             }
 
-            bs.deeper(trailingDataBytes);
             for (int i = 0; i < x.length(); i++) {
                 final char c = x.charAt(i);
+                bs.putBoolean(true);
                 bs.putByte((byte)((int)c < 255 ? c : '?'));
             }
-            bs.putEnd(trailingDataBytes);
+            bs.putBoolean(false);
         }
 
     }
@@ -376,25 +379,33 @@ public class Loader {
     static class ByteArraySchema implements Schema<byte[]> {
         public static Schema<byte[]> INSTANCE = new ByteArraySchema();
 
-        public byte[] read(BitStream2 bs, int trailingDataBytes) {
-            bs.deeper(trailingDataBytes);
-            final byte[] xs = new byte[bs.bytesToEnd(trailingDataBytes)];
+        public byte[] read(BitStream3 bs) {
+            final long mark = bs.mark();
+            int count = 0;
+            while (bs.getBoolean()) {
+                count++;
+                bs.getByte();
+            }
+            bs.reset(mark);
+
+            final byte[] xs = new byte[count];
             for (int i = 0; i < xs.length; i++) {
+                assert(bs.getBoolean());
                 xs[i] = bs.getByte();
             }
-            if (!bs.tryGetEnd(trailingDataBytes)) throw new IllegalStateException("bytesToEnd() invariant violation");
+            assert(!bs.getBoolean());
             return xs;
         }
 
         public int maximumSizeBits() { return -1; }
-        public int sizeBits(byte[] x) { return xxx ? x.length * 8 : x.length * 9 + 1; }
+        public int sizeBits(byte[] x) { return x.length * 9 + 1; }
 
-        public void write(BitStream2 bs, int trailingDataBytes, byte[] x) {
-            bs.deeper(trailingDataBytes);
+        public void write(BitStream3 bs, byte[] x) {
             for (byte aX : x) {
+                bs.putBoolean(true);
                 bs.putByte(aX);
             }
-            bs.putEnd(trailingDataBytes);
+            bs.putBoolean(false);
         }
     }
 
@@ -439,7 +450,7 @@ public class Loader {
         // Used for temporary scratch storage within the context of a single method only, basically
         // just to save some calls to the allocator. The sole reason why Index is not thread safe.
         final long kBufferPtr, vBufferPtr;
-        final BitStream2 bs = new BitStream2();
+        final BitStream3 bs = new BitStream3();
 
         Index(Database db, long dbi, Schema<K> kSchema, Schema<V> vSchema) {
             this.db = db;
@@ -471,7 +482,7 @@ public class Loader {
             unsafe.putAddress(bufferPtr, sz);
             unsafe.putAddress(bufferPtr + Unsafe.ADDRESS_SIZE, bufferPtr + 2 * Unsafe.ADDRESS_SIZE);
             bs.initialize(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, sz);
-            schema.write(bs, 0, x);
+            schema.write(bs, x);
         }
 
         private static long allocateBufferPointer(long bufferPtr, int sz) {
@@ -510,7 +521,8 @@ public class Loader {
             unsafe.putAddress(vBufferPtrNow, vSz);
             try {
                 Util.checkErrorCode(JNI.mdb_put_raw(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
-                vSchema.write(new BitStream2(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz), 0, v);
+                bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz);
+                vSchema.write(bs, v);
             } finally {
                 freeBufferPointer(vBufferPtr, vBufferPtrNow);
                 freeBufferPointer(kBufferPtr, kBufferPtrNow);
@@ -547,7 +559,8 @@ public class Loader {
                     return null;
                 } else {
                     Util.checkErrorCode(rc);
-                    return vSchema.read(new BitStream2(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(vBufferPtrNow)), 0);
+                    bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(vBufferPtrNow));
+                    return vSchema.read(bs);
                 }
             } finally {
                 freeBufferPointer(vBufferPtr, vBufferPtrNow);
@@ -634,8 +647,6 @@ public class Loader {
         }
     }
 
-    // FIXME: we can detect the end of level 0 implicitly, why should we pay to store e.g. a single string?
-    // This literally ONLY works in the tail position. You can't even have a variable length thing followed by a fixed length.
     // FIXME: type specialisation for true 0-allocation?
     // TODO: duplicate item support
     static class Cursor<K, V> implements AutoCloseable {
@@ -732,13 +743,13 @@ public class Loader {
         public K getKey() {
             if (bufferPtrStale) { refresh(); }
             index.bs.initialize(unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr));
-            return index.kSchema.read(index.bs, 0);
+            return index.kSchema.read(index.bs);
         }
 
         public V getValue() {
             if (bufferPtrStale) { refresh(); }
             index.bs.initialize(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE));
-            return index.vSchema.read(index.bs, 0);
+            return index.vSchema.read(index.bs);
         }
 
         public void put(V v) {
@@ -749,7 +760,7 @@ public class Loader {
             unsafe.putAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, vSz);
             Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, JNI.MDB_CURRENT | JNI.MDB_RESERVE));
             index.bs.initialize(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), vSz);
-            index.vSchema.write(index.bs, 0, v);
+            index.vSchema.write(index.bs, v);
 
             bufferPtrStale = false;
         }
@@ -765,7 +776,8 @@ public class Loader {
             unsafe.putAddress(vBufferPtrNow, vSz);
             try {
                 Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
-                index.vSchema.write(new BitStream2(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz), 0, v);
+                index.bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz);
+                index.vSchema.write(index.bs, v);
             } finally {
                 Index.freeBufferPointer(index.vBufferPtr, vBufferPtrNow);
                 Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);

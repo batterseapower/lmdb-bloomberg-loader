@@ -15,6 +15,19 @@ public class BitStream3 {
         initialize(ptr, sz);
     }
 
+    // NB: cannot use a returned mark once the BitStream has been reinitialized (and hence the endPtr changed)
+    public long mark() {
+        if ((ptr & 0xE000000000000000l) != 0l) {
+            throw new IllegalStateException("This code is relying on the invariant that pointers on x64 are only 48 bits long and don't use their upper bits");
+        }
+        return ptr | ((long)bitOffset << 61);
+    }
+
+    public void reset(long mark) {
+        bitOffset = (byte)(mark >>> 61);
+        ptr = mark & ~0xE000000000000000l;
+    }
+
     public void initialize(long ptr, int sz) {
         this.ptr = ptr;
         this.endPtr = ptr + sz;
