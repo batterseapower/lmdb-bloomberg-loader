@@ -1,6 +1,7 @@
 package uk.co.omegaprime;
 
 import static uk.co.omegaprime.Bits.bigEndian;
+import static uk.co.omegaprime.Bits.unsafe;
 
 public class BitStream3 {
     private long ptr;
@@ -34,6 +35,12 @@ public class BitStream3 {
         this.bitOffset = 0;
     }
 
+    public void zeroFill() {
+        if (bitOffset != 0) {
+            unsafe.putByte(ptr, (byte)(unsafe.getByte(ptr) & (0xFF << (8 - bitOffset))));
+        }
+    }
+
     // NB: can't implement remainingBits since we only get an endPtr, not an endBitOffset
     public int remainingBytes() {
         return (int)(endPtr - ptr) - bitOffset == 0 ? 0 : 1;
@@ -41,7 +48,7 @@ public class BitStream3 {
 
     public boolean getBoolean() {
         byte x = Bits.unsafe.getByte(ptr);
-        boolean result = (x << bitOffset) >> 7 == 1;
+        boolean result = (((x << bitOffset) >> 7) & 1) == 1;
         advanceBits(1);
         return result;
     }
@@ -70,9 +77,9 @@ public class BitStream3 {
     }
 
     public void putBoolean(boolean x) {
-        final int mask = 1 << (8 - bitOffset);
-        byte cleared = (byte)(Bits.unsafe.getByte(ptr) & ~mask);
-        Bits.unsafe.putByte(ptr, x ? (byte)(cleared | (1 << (8 - bitOffset))) : cleared);
+        byte current = Bits.unsafe.getByte(ptr);
+        int mask = 1 << (7 - bitOffset);
+        Bits.unsafe.putByte(ptr, (byte)(x ? current | mask : current & ~mask));
         advanceBits(1);
     }
 

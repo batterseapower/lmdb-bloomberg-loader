@@ -112,6 +112,42 @@ public class LoaderTest {
     }
 
     @Test
+    public void canStoreNullFreeStrings() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<String, Long> index = db.createIndex(tx, "Test", NullFreeStringSchema.INSTANCE, LongSchema.INSTANCE);
+
+                index.put(tx, "Foo", 1l);
+                index.put(tx, "Fooa", 2l);
+                index.put(tx, "Fo", 3l);
+                index.put(tx, "Foa", 4l);
+
+                assertEquals(Arrays.asList("Fo", "Foa", "Foo", "Fooa"), iteratorToList(index.keys(tx)));
+
+                tx.commit();
+            }
+        }
+    }
+
+    @Test
+    public void canStoreStrings() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<String, Long> index = db.createIndex(tx, "Test", StringSchema.INSTANCE, LongSchema.INSTANCE);
+
+                index.put(tx, "Foo", 1l);
+                index.put(tx, "Fooa", 2l);
+                index.put(tx, "Fo", 3l);
+                index.put(tx, "Foa", 4l);
+
+                assertEquals(Arrays.asList("Fo", "Foa", "Foo", "Fooa"), iteratorToList(index.keys(tx)));
+
+                tx.commit();
+            }
+        }
+    }
+
+    @Test
     public void canStoreCompositeStringKey() {
         try (final Database db = createDatabase()) {
             try (final Transaction tx = db.transaction(false)) {
