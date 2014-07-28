@@ -987,8 +987,8 @@ public class Loader {
     }
 
     private static class FieldValueSchema {
-        public static Schema<FieldValue> INSTANCE = Schema.zipWith(new Latin1StringSchema(64), FieldValue::getValue,
-                                                                   LocalDateSchema.INSTANCE,   FieldValue::getToDate,
+        public static Schema<FieldValue> INSTANCE = Schema.zipWith(new Latin1StringSchema(64),                FieldValue::getValue,
+                                                                   Schema.nullable(LocalDateSchema.INSTANCE), FieldValue::getToDate,
                                                                    FieldValue::new);
     }
 
@@ -1120,7 +1120,7 @@ public class Loader {
                     if (cursor.moveFloor(fieldKey) && cursor.getKey().idBBGlobal.equals(fieldKey.idBBGlobal)) {
                         // There is a range in the map starting before the date of interest: we might have to truncate it
                         final FieldValue fieldValue = cursor.getValue();
-                        if (fieldValue.getToDate().isAfter(date)) {
+                        if (fieldValue.getToDate() == null || fieldValue.getToDate().isAfter(date)) {
                             cursor.put(fieldValue.setToDate(date));
                         }
                     }
@@ -1128,7 +1128,7 @@ public class Loader {
                     final boolean mustCreate;
                     if (cursor.moveFloor(fieldKey) && cursor.getKey().idBBGlobal.equals(fieldKey.idBBGlobal)) {
                         final FieldValue fieldValue = cursor.getValue();
-                        if (fieldValue.getToDate().isAfter(date)) {
+                        if (fieldValue.getToDate() == null || fieldValue.getToDate().isAfter(date)) {
                             // There is a range in the map enclosing the date of interest
                             if (fieldValue.value.equals(value)) {
                                 mustCreate = false;
@@ -1146,7 +1146,7 @@ public class Loader {
                     }
 
                     if (mustCreate) {
-                        cursor.put(fieldKey, new FieldValue(value, LocalDate.of(2999, 1, 1))); // TODO: nulls or ADTs instead of a dummy value?
+                        cursor.put(fieldKey, new FieldValue(value, null));
                     }
                 }
             }
