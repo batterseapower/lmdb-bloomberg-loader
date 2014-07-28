@@ -368,6 +368,44 @@ public class Loader {
         public static Schema<String> INSTANCE = ByteArraySchema.INSTANCE.map((String x) -> x.getBytes(UTF8), (byte[] xs) -> new String(xs, UTF8));
     }
 
+    static class ListSchema {
+        public static <T> Schema<List<T>> of(Schema<T> schema) {
+            return new Schema<List<T>>() {
+                @Override
+                public List<T> read(BitStream3 bs) {
+                    final ArrayList<T> xs = new ArrayList<>();
+                    while (bs.getBoolean()) {
+                        xs.add(schema.read(bs));
+                    }
+                    return xs;
+                }
+
+                @Override
+                public int maximumSizeBits() {
+                    return -1;
+                }
+
+                @Override
+                public int sizeBits(List<T> xs) {
+                    int size = 0;
+                    for (T x : xs) {
+                        size += schema.sizeBits(x);
+                    }
+                    return size;
+                }
+
+                @Override
+                public void write(BitStream3 bs, List<T> xs) {
+                    for (T x : xs) {
+                        bs.putBoolean(true);
+                        schema.write(bs, x);
+                    }
+                    bs.putBoolean(false);
+                }
+            };
+        }
+    }
+
     // TODO: should this be the default?
     static class NullFreeStringSchema implements Schema<String> {
         public static NullFreeStringSchema INSTANCE = new NullFreeStringSchema();
