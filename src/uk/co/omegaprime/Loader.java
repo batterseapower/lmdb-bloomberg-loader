@@ -145,83 +145,87 @@ public class Loader {
         public static <T, U, V> Schema<V> zipWith(Schema<T> leftSchema, Function<V, T> leftProj, Schema<U> rightSchema, Function<V, U> rightProj, BiFunction<T, U, V> f) {
             return new Schema<V>() {
                 @Override
-                public V read(BitStream2 bs, int trailingDataBytes) {
-                    return f.apply(leftSchema.read(bs, rightSchema.maximumSize() == 0 ? trailingDataBytes : -1), rightSchema.read(bs, trailingDataBytes));
+                public V read(BitStream3 bs, int trailingDataBytes) {
+                    return f.apply(leftSchema.read(bs, rightSchema.maximumSizeBits() == 0 ? trailingDataBytes : -1), rightSchema.read(bs, trailingDataBytes));
                 }
 
                 @Override
-                public int maximumSize() {
-                    return (leftSchema.maximumSize() >= 0 && rightSchema.maximumSize() >= 0) ? Math.max(leftSchema.maximumSize(), rightSchema.maximumSize()) : -1;
+                public int maximumSizeBits() {
+                    return (leftSchema.maximumSizeBits() >= 0 && rightSchema.maximumSizeBits() >= 0) ? Math.max(leftSchema.maximumSizeBits(), rightSchema.maximumSizeBits()) : -1;
                 }
 
                 @Override
-                public int size(V x) {
-                    return leftSchema.size(leftProj.apply(x)) + rightSchema.size(rightProj.apply(x));
+                public int sizeBits(V x, int trailingDataBytes) {
+                    return leftSchema.sizeBits(leftProj.apply(x), rightSchema.maximumSizeBits() == 0 ? trailingDataBytes : -1) + rightSchema.sizeBits(rightProj.apply(x), trailingDataBytes);
                 }
 
                 @Override
-                public void write(BitStream2 bs, int trailingDataBytes, V x) {
-                    leftSchema.write (bs, rightSchema.maximumSize() == 0 ? trailingDataBytes : -1, leftProj .apply(x));
-                    rightSchema.write(bs, trailingDataBytes,                                       rightProj.apply(x));
+                public void write(BitStream3 bs, int trailingDataBytes, V x) {
+                    leftSchema.write (bs, rightSchema.maximumSizeBits() == 0 ? trailingDataBytes : -1, leftProj .apply(x));
+                    rightSchema.write(bs, trailingDataBytes,                                           rightProj.apply(x));
                 }
             };
         }
 
+        // FIXME: I don't think that the trailingDataBytes stuff works. Consider nullable(VoidSchema.INSTANCE)
+        // at the top level. Both "null" and "Void" will be serialized as 0 bits and so are indistinguishable.
+        // This also applies if the thing inside the nullable is of sub-byte length (e.g. another nullable or
+        // None branch of an option type)
         public static <T> Schema<T> nullable(Schema<T> schema) {
             return new Schema<T>() {
                 @Override
-                public T read(BitStream2 bs, int trailingDataBytes) {
-                    bs.deeper(trailingDataBytes);
-                    if (bs.tryGetEnd(trailingDataBytes)) {
+                public T read(BitStream3 bs, int trailingDataBytes) {
+                    if (trailingDataBytes < 0 ? !bs.getBoolean() : (bs.remainingBytes() - trailingDataBytes) <= 0) {
                         return null;
                     } else {
-                        T result = schema.read(bs, trailingDataBytes);
-                        // FIXME: why should we have to pay 2 bits rather than 1?
-                        if (!bs.tryGetEnd(trailingDataBytes)) throw new IllegalStateException("Impossible: corrupt data in nullable column?");
-                        return result;
+                        return schema.read(bs, trailingDataBytes);
                     }
                 }
 
                 @Override
-                public int maximumSize() {
-                    return schema.maximumSize();
+                public int maximumSizeBits() {
+                    return 2 + schema.maximumSizeBits();
                 }
 
                 @Override
-                public int size(T x) {
-                    return schema.size(x);
+                public int sizeBits(T x, int trailingDataBytes) {
+                    final int rawSizeBits = x == null ? 0 : schema.sizeBits(x, trailingDataBytes);
+                    return trailingDataBytes >= 0 ? rawSizeBits : 1 + rawSizeBits;
                 }
 
                 @Override
-                public void write(BitStream2 bs, int trailingDataBytes, T x) {
-                    bs.deeper(trailingDataBytes);
-                    schema.write(bs, trailingDataBytes, x);
-                    bs.putEnd(trailingDataBytes);
+                public void write(BitStream3 bs, int trailingDataBytes, T x) {
+                    if (x == null) {
+                        if (trailingDataBytes < 0) bs.putBoolean(false);
+                    } else {
+                        if (trailingDataBytes < 0) bs.putBoolean(true);
+                        schema.write(bs, trailingDataBytes, x);
+                    }
                 }
             };
         }
 
-        T read(BitStream2 bs, int trailingDataBytes);
-        int maximumSize();
-        int size(T x);
-        void write(BitStream2 bs, int trailingDataBytes, T x);
+        T read(BitStream3 bs, int trailingDataBytes);
+        int maximumSizeBits();
+        int sizeBits(T x, int trailingDataBytes);
+        void write(BitStream3 bs, int trailingDataBytes, T x);
 
         default <U> Schema<U> map(Function<U, T> f, Function<T, U> g) {
             final Schema<T> parent = this;
             return new Schema<U>() {
-                public U read(BitStream2 bs, int trailingDataBytes) {
+                public U read(BitStream3 bs, int trailingDataBytes) {
                     return g.apply(parent.read(bs, trailingDataBytes));
                 }
 
-                public int maximumSize() {
-                    return parent.maximumSize();
+                public int maximumSizeBits() {
+                    return parent.maximumSizeBits();
                 }
 
-                public int size(U x) {
-                    return parent.size(f.apply(x));
+                public int sizeBits(U x, int trailingDataBytes) {
+                    return parent.sizeBits(f.apply(x), trailingDataBytes);
                 }
 
-                public void write(BitStream2 bs, int trailingDataBytes, U x) {
+                public void write(BitStream3 bs, int trailingDataBytes, U x) {
                     parent.write(bs, trailingDataBytes, f.apply(x));
                 }
             };
@@ -232,8 +236,8 @@ public class Loader {
         public static VoidSchema INSTANCE = new VoidSchema();
 
         public Void read(BitStream2 bs, int trailingDataBytes) { return null; }
-        public int maximumSize() { return 0; }
-        public int size(Void x) { return maximumSize(); }
+        public int maximumSizeBits() { return 0; }
+        public int sizeBits(Void x, int trailingDataBytes) { return maximumSizeBits(); }
         public void write(BitStream2 bs, int trailingDataBytes, Void x) { }
     }
 
@@ -241,8 +245,8 @@ public class Loader {
         public static IntegerSchema INSTANCE = new IntegerSchema();
 
         public Integer read(BitStream2 bs, int trailingDataBytes) { return swapSign(bs.getInt()); }
-        public int maximumSize() { return Integer.BYTES; }
-        public int size(Integer x) { return maximumSize(); }
+        public int maximumSizeBits() { return Integer.BYTES * 8; }
+        public int sizeBits(Integer x, int trailingDataBytes) { return maximumSizeBits(); }
         public void write(BitStream2 bs, int trailingDataBytes, Integer x) { bs.putInt(swapSign(x)); }
     }
 
@@ -250,8 +254,8 @@ public class Loader {
         public static UnsignedIntegerSchema INSTANCE = new UnsignedIntegerSchema();
 
         public Integer read(BitStream2 bs, int trailingDataBytes) { return bs.getInt(); }
-        public int maximumSize() { return Long.BYTES; }
-        public int size(Integer x) { return maximumSize(); }
+        public int maximumSizeBits() { return Integer.BYTES * 8; }
+        public int sizeBits(Integer x, int trailingDataBytes) { return maximumSizeBits(); }
         public void write(BitStream2 bs, int trailingDataBytes, Integer x) { bs.putInt(x); }
     }
 
@@ -259,8 +263,8 @@ public class Loader {
         public static LongSchema INSTANCE = new LongSchema();
 
         public Long read(BitStream2 bs, int trailingDataBytes) { return swapSign(bs.getLong()); }
-        public int maximumSize() { return Long.BYTES; }
-        public int size(Long x) { return maximumSize(); }
+        public int maximumSizeBits() { return Long.BYTES * 8; }
+        public int sizeBits(Long x, int trailingDataBytes) { return maximumSizeBits(); }
         public void write(BitStream2 bs, int trailingDataBytes, Long x) { bs.putLong(swapSign(x)); }
     }
 
@@ -268,8 +272,8 @@ public class Loader {
         public static UnsignedLongSchema INSTANCE = new UnsignedLongSchema();
 
         public Long read(BitStream2 bs, int trailingDataBytes) { return bs.getLong(); }
-        public int maximumSize() { return Long.BYTES; }
-        public int size(Long x) { return maximumSize(); }
+        public int maximumSizeBits() { return Long.BYTES * 8; }
+        public int sizeBits(Long x, int trailingDataBytes) { return maximumSizeBits(); }
         public void write(BitStream2 bs, int trailingDataBytes, Long x) { bs.putLong(x); }
     }
 
@@ -286,8 +290,8 @@ public class Loader {
         }
 
         public Float read(BitStream2 bs, int trailingDataBytes) { return Float.intBitsToFloat(fromDB(bs.getInt())); }
-        public int maximumSize() { return Float.BYTES; }
-        public int size(Float x) { return maximumSize(); }
+        public int maximumSizeBits() { return Float.BYTES * 8; }
+        public int sizeBits(Float x, int trailingDataBytes) { return maximumSizeBits(); }
         public void write(BitStream2 bs, int trailingDataBytes, Float x) { bs.putInt(toDB(Float.floatToRawIntBits(x))); }
     }
 
@@ -304,8 +308,8 @@ public class Loader {
         }
 
         public Double read(BitStream2 bs, int trailingDataBytes) { return Double.longBitsToDouble(fromDB(bs.getLong())); }
-        public int maximumSize() { return Double.BYTES; }
-        public int size(Double x) { return maximumSize(); }
+        public int maximumSizeBits() { return Double.BYTES * 8; }
+        public int sizeBits(Double x, int trailingDataBytes) { return maximumSizeBits(); }
         public void write(BitStream2 bs, int trailingDataBytes, Double x) { bs.putLong(toDB(Double.doubleToRawLongBits(x))); }
     }
 
@@ -330,13 +334,13 @@ public class Loader {
         }
 
         @Override
-        public int maximumSize() {
-            return maximumLength;
+        public int maximumSizeBits() {
+            return maximumLength * 9 + 1;
         }
 
         @Override
-        public int size(String x) {
-            return x.length();
+        public int sizeBits(String x, int trailingDataBytes) {
+            return trailingDataBytes >= 0 ? x.length() * 8 : x.length() * 9 + 1;
         }
 
         @Override
@@ -382,8 +386,8 @@ public class Loader {
             return xs;
         }
 
-        public int maximumSize() { return -1; }
-        public int size(byte[] x) { return x.length; }
+        public int maximumSizeBits() { return -1; }
+        public int sizeBits(byte[] x) { return xxx ? x.length * 8 : x.length * 9 + 1; }
 
         public void write(BitStream2 bs, int trailingDataBytes, byte[] x) {
             bs.deeper(trailingDataBytes);
@@ -448,11 +452,11 @@ public class Loader {
         }
 
         private static <T> long allocateSharedBufferPointer(Schema<T> schema) {
-            if (schema.maximumSize() < 0) {
+            if (schema.maximumSizeBits() < 0) {
                 // TODO: speculatively allocate a reasonable amount of memory that most allocations of interest might fit into?
                 return 0;
             } else {
-                return allocateBufferPointer(0, schema.maximumSize());
+                return allocateBufferPointer(0, bitsToBytes(schema.maximumSizeBits()));
             }
         }
 
@@ -497,8 +501,8 @@ public class Loader {
         }
 
         public void put(Transaction tx, K k, V v) {
-            final int kSz = kSchema.size(k);
-            final int vSz = vSchema.size(v);
+            final int kSz = bitsToBytes(kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(vSchema.sizeBits(v));
 
             final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
             fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
@@ -514,7 +518,7 @@ public class Loader {
         }
 
         public boolean remove(Transaction tx, K k) {
-            final int kSz = kSchema.size(k);
+            final int kSz = bitsToBytes(kSchema.sizeBits(k));
 
             final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
             fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
@@ -532,7 +536,7 @@ public class Loader {
         }
 
         public V get(Transaction tx, K k) {
-            final int kSz = kSchema.size(k);
+            final int kSz = bitsToBytes(kSchema.sizeBits(k));
 
             final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
             fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
@@ -552,7 +556,7 @@ public class Loader {
         }
 
         public boolean contains(Transaction tx, K k) {
-            final int kSz = kSchema.size(k);
+            final int kSz = bitsToBytes(kSchema.sizeBits(k));
 
             final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
             fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
@@ -678,7 +682,7 @@ public class Loader {
         boolean refresh() { return move(JNI.MDB_GET_CURRENT); }
 
         private boolean move(K k, int op) {
-            final int kSz = index.kSchema.size(k);
+            final int kSz = bitsToBytes(index.kSchema.sizeBits(k));
 
             final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
             index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
@@ -703,7 +707,7 @@ public class Loader {
         private boolean keyEquals(K k) {
             if (bufferPtrStale) { refresh(); }
 
-            final int kSz = index.kSchema.size(k);
+            final int kSz = bitsToBytes(index.kSchema.sizeBits(k));
             if (kSz != unsafe.getAddress(bufferPtr)) {
                 return false;
             }
@@ -740,7 +744,7 @@ public class Loader {
         public void put(V v) {
             if (bufferPtrStale) { refresh(); }
 
-            final int vSz = index.vSchema.size(v);
+            final int vSz = bitsToBytes(index.vSchema.sizeBits(v));
 
             unsafe.putAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, vSz);
             Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, JNI.MDB_CURRENT | JNI.MDB_RESERVE));
@@ -752,8 +756,8 @@ public class Loader {
 
         // This method has a lot in common with Index.put. LMDB actually just implements mdb_put using mdb_cursor_put, so this makes sense!
         public void put(K k, V v) {
-            final int kSz = index.kSchema.size(k);
-            final int vSz = index.vSchema.size(v);
+            final int kSz = bitsToBytes(index.kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(index.vSchema.sizeBits(v));
 
             final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
             index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
