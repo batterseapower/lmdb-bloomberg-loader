@@ -112,6 +112,30 @@ public class LoaderTest {
     }
 
     @Test
+    public void canStoreCompositeStringKey() {
+        try (final Database db = createDatabase()) {
+            try (final Transaction tx = db.transaction(false)) {
+                final Index<String, Integer> index = db.createIndex(tx, "Test", Schema.zipWith(StringSchema.INSTANCE, (String x) -> x.split("/", 2)[0],
+                                                                                               StringSchema.INSTANCE, (String x) -> x.split("/", 2)[1],
+                                                                                               (String x, String y) -> x + "/" + y),
+                                                                                IntegerSchema.INSTANCE);
+
+                index.put(tx, "Food/Bean", 10);
+                index.put(tx, "Air/Bean", 11);
+                index.put(tx, "Apple/Bean", 12);
+                index.put(tx, "Apple/Beans", 13);
+                index.put(tx, "Apple/Carrot", 14);
+                index.put(tx, "Airpie/Bean", 15);
+
+                assertEquals(Arrays.asList("Air/Bean", "Airpie/Bean", "Apple/Bean", "Apple/Beans", "Apple/Carrot", "Food/Bean"),
+                             iteratorToList(index.keys(tx)));
+
+                tx.commit();
+            }
+        }
+    }
+
+    @Test
     public void canStoreLongs() {
         try (final Database db = createDatabase()) {
             try (final Transaction tx = db.transaction(false)) {
@@ -173,7 +197,7 @@ public class LoaderTest {
     public void unsignedIntegerSchemaStoresCorrectOrdering() {
         final long ptr = unsafe.allocateMemory(Integer.BYTES);
         try {
-            UnsignedIntegerSchema.INSTANCE.write(new BitStream2(ptr, Integer.BYTES), 0xCAFEBABE);
+            UnsignedIntegerSchema.INSTANCE.write(new BitStream2(ptr, Integer.BYTES), 0, 0xCAFEBABE);
             assertEquals((byte)0xCA, unsafe.getByte(ptr + 0));
             assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
             assertEquals((byte)0xBE, unsafe.getByte(ptr + Integer.BYTES - 1));
@@ -186,7 +210,7 @@ public class LoaderTest {
     public void integerSchemaStoresCorrectOrdering() {
         final long ptr = unsafe.allocateMemory(Integer.BYTES);
         try {
-            IntegerSchema.INSTANCE.write(new BitStream2(ptr, Integer.BYTES), 0xCAFEBABE);
+            IntegerSchema.INSTANCE.write(new BitStream2(ptr, Integer.BYTES), 0, 0xCAFEBABE);
             // 0xC = 12 = 1010b ==> 0010b = 0x4
             assertEquals((byte)0x4A, unsafe.getByte(ptr + 0));
             assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
@@ -200,7 +224,7 @@ public class LoaderTest {
     public void unsignedLongSchemaStoresCorrectOrdering() {
         final long ptr = unsafe.allocateMemory(Long.BYTES);
         try {
-            UnsignedLongSchema.INSTANCE.write(new BitStream2(ptr, Long.BYTES), 0xCAFEBABEDEADBEEFl);
+            UnsignedLongSchema.INSTANCE.write(new BitStream2(ptr, Long.BYTES), 0, 0xCAFEBABEDEADBEEFl);
             assertEquals((byte)0xCA, unsafe.getByte(ptr + 0));
             assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));
             assertEquals((byte)0xEF, unsafe.getByte(ptr + Long.BYTES - 1));
@@ -213,7 +237,7 @@ public class LoaderTest {
     public void longSchemaStoresCorrectOrdering() {
         final long ptr = unsafe.allocateMemory(Long.BYTES);
         try {
-            LongSchema.INSTANCE.write(new BitStream2(ptr, Long.BYTES), 0xCAFEBABEDEADBEEFl);
+            LongSchema.INSTANCE.write(new BitStream2(ptr, Long.BYTES), 0, 0xCAFEBABEDEADBEEFl);
             // 0xC = 12 = 1010b ==> 0010b = 0x4
             assertEquals((byte)0x4A, unsafe.getByte(ptr + 0));
             assertEquals((byte)0xFE, unsafe.getByte(ptr + 1));

@@ -23,8 +23,14 @@ public class BitStream2 {
         this.depth = 0;
     }
 
-    public void deeper() {
-        if (depth == 0) {
+    // Supply the number of bytes that will be written to the stream after the corresponding putEnd
+    // or will be read from the stream after the corresponding tryGetEnd.
+    public void deeper(int trailingDataBytes) {
+        if (trailingDataBytes >= 0) {
+            if (depth > 0) {
+                throw new IllegalStateException("We were told that there were " + trailingDataBytes + " bytes guaranteed after this variable length block, but the nested section we are in was not.. something is amiss");
+            }
+        } else if (depth == 0) {
             depth = 1;
             advance(0);
         } else {
@@ -32,12 +38,14 @@ public class BitStream2 {
         }
     }
 
-    public boolean tryGetEnd() {
+    // Supply the number of bytes that will be read from the stream after this point.
+    public boolean tryGetEnd(int trailingDataBytes) {
         if (depth == 0) {
+            final long blockEndPtr = trailingDataBytes >= 0 ? endPtr - trailingDataBytes : endPtr;
             // After writing a stream we do not necessarily end up on a byte boundary, even if we started on one.
             // This method still returns true iff we at the end of the stream, so long as we don't write to the
             // bitstream in units of less than 8 bits.
-            return bitOffset == 0 ? ptr == endPtr : ptr + 1 == endPtr;
+            return bitOffset == 0 ? ptr == blockEndPtr : ptr + 1 == blockEndPtr;
         } else {
             final boolean isEnd;
             if (bitOffset == 0) {
@@ -55,9 +63,11 @@ public class BitStream2 {
     }
 
     // This can be implemented by the clients in the terms of other methods, but it is universally handy
-    public int bytesToEnd() {
+    // Supply the number of bytes that will be read from the stream after the corresponding tryGetEnd.
+    public int bytesToEnd(int trailingDataBytes) {
         if (depth == 0) {
-            return (int)(endPtr - ptr - (bitOffset == 0 ? 0 : 1));
+            final long blockEndPtr = trailingDataBytes >= 0 ? endPtr - trailingDataBytes : endPtr;
+            return (int)(blockEndPtr - ptr - (bitOffset == 0 ? 0 : 1));
         } else {
             int count = -1;
             boolean isEnd;
@@ -122,10 +132,13 @@ public class BitStream2 {
         }
     }
 
-    public void putEnd() {
-        writeWaste(false);
-        depth -= 1;
-        advance(0);
+    // Supply the number of bytes that will be put to the stream after this point (or negative if unknown)
+    public void putEnd(int trailingDataBytes) {
+        if (trailingDataBytes < 0) {
+            writeWaste(false);
+            depth -= 1;
+            advance(0);
+        }
     }
 
     public void putByte(byte x) {
