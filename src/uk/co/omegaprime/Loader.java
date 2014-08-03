@@ -93,11 +93,22 @@ public class Loader {
         public <K, V> Index<K, V> createIndex(Transaction tx, String name, Schema<K> kSchema, Schema<V> vSchema) {
             return index(tx, name, kSchema, vSchema, true);
         }
-
         public <K, V> Index<K, V> index(Transaction tx, String name, Schema<K> kSchema, Schema<V> vSchema, boolean allowCreation) {
             final long[] dbiPtr = new long[1];
             Util.checkErrorCode(JNI.mdb_dbi_open(tx.txn, name, allowCreation ? JNI.MDB_CREATE : 0, dbiPtr));
             return new Index<>(this, dbiPtr[0], kSchema, vSchema);
+        }
+
+        public <K, V> IndexWithDuplicateKeys<K, V> indexWithDuplicateKeys(Transaction tx, String name, Schema<K> kSchema, Schema<V> vSchema) {
+            return indexWithDuplicateKeys(tx, name, kSchema, vSchema, false);
+        }
+        public <K, V> IndexWithDuplicateKeys<K, V> createIndexWithDuplicateKeys(Transaction tx, String name, Schema<K> kSchema, Schema<V> vSchema) {
+            return indexWithDuplicateKeys(tx, name, kSchema, vSchema, true);
+        }
+        public <K, V> IndexWithDuplicateKeys<K, V> indexWithDuplicateKeys(Transaction tx, String name, Schema<K> kSchema, Schema<V> vSchema, boolean allowCreation) {
+            final long[] dbiPtr = new long[1];
+            Util.checkErrorCode(JNI.mdb_dbi_open(tx.txn, name, JNI.MDB_DUPSORT | (allowCreation ? JNI.MDB_CREATE : 0), dbiPtr));
+            return new IndexWithDuplicateKeys<>(this, dbiPtr[0], kSchema, vSchema);
         }
 
         // Quoth the docs:
@@ -576,15 +587,15 @@ public class Loader {
         }
 
         // INVARIANT: sz == schema.size(x)
-        private <T> void fillBufferPointerFromSchema(Schema<T> schema, long bufferPtr, int sz, T x) {
+        protected <T> void fillBufferPointerFromSchema(Schema<T> schema, long bufferPtr, int sz, T x) {
             unsafe.putAddress(bufferPtr, sz);
             unsafe.putAddress(bufferPtr + Unsafe.ADDRESS_SIZE, bufferPtr + 2 * Unsafe.ADDRESS_SIZE);
             bs.initialize(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, sz);
             schema.write(bs, x);
-            bs.zeroFill(); // Very important to do this for keys but we skip it for values
+            bs.zeroFill();
         }
 
-        private static long allocateBufferPointer(long bufferPtr, int sz) {
+        protected static long allocateBufferPointer(long bufferPtr, int sz) {
             if (bufferPtr != 0) {
                 return bufferPtr;
             } else {
@@ -592,7 +603,7 @@ public class Loader {
             }
         }
 
-        private static void freeBufferPointer(long bufferPtr, long bufferPtrNow) {
+        protected static void freeBufferPointer(long bufferPtr, long bufferPtrNow) {
             if (bufferPtr == 0) {
                 unsafe.freeMemory(bufferPtrNow);
             }
@@ -619,11 +630,38 @@ public class Loader {
             final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, vSz);
             unsafe.putAddress(vBufferPtrNow, vSz);
             try {
-                Util.checkErrorCode(JNI.mdb_put_raw(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
+                Util.checkErrorCode(JNI.mdb_put(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
                 assert(unsafe.getAddress(vBufferPtrNow) == vSz);
                 bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz);
                 vSchema.write(bs, v);
                 bs.zeroFill();
+            } finally {
+                freeBufferPointer(vBufferPtr, vBufferPtrNow);
+                freeBufferPointer(kBufferPtr, kBufferPtrNow);
+            }
+        }
+
+        public V putIfAbsent(Transaction tx, K k, V v) {
+            final int kSz = bitsToBytes(kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(vSchema.sizeBits(v));
+
+            final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
+            fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, vSz);
+            fillBufferPointerFromSchema(vSchema, vBufferPtrNow, vSz, v);
+            try {
+                int rc = JNI.mdb_put(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE | JNI.MDB_NOOVERWRITE);
+                if (rc == JNI.MDB_KEYEXIST) {
+                    bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(vBufferPtrNow));
+                    return vSchema.read(bs);
+                } else {
+                    Util.checkErrorCode(rc);
+                    assert(unsafe.getAddress(vBufferPtrNow) == vSz);
+                    bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz);
+                    vSchema.write(bs, v);
+                    bs.zeroFill();
+                    return null;
+                }
             } finally {
                 freeBufferPointer(vBufferPtr, vBufferPtrNow);
                 freeBufferPointer(kBufferPtr, kBufferPtrNow);
@@ -636,7 +674,7 @@ public class Loader {
             final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
             fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
             try {
-                int rc = JNI.mdb_del_raw(tx.txn, dbi, kBufferPtrNow, 0);
+                int rc = JNI.mdb_del(tx.txn, dbi, kBufferPtrNow, 0);
                 if (rc == JNI.MDB_NOTFOUND) {
                     return false;
                 } else {
@@ -655,7 +693,7 @@ public class Loader {
             fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
             final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, 0);
             try {
-                int rc = JNI.mdb_get_raw(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow);
+                int rc = JNI.mdb_get(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow);
                 if (rc == JNI.MDB_NOTFOUND) {
                     return null;
                 } else {
@@ -676,7 +714,7 @@ public class Loader {
             fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
             final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, 0);
             try {
-                int rc = JNI.mdb_get_raw(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow);
+                int rc = JNI.mdb_get(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow);
                 if (rc == JNI.MDB_NOTFOUND) {
                     return false;
                 } else {
@@ -713,6 +751,30 @@ public class Loader {
             };
         }
 
+        public Iterator<V> values(Transaction tx) {
+            final Cursor<K, V> cursor = createCursor(tx);
+            final boolean initialHasNext = cursor.moveFirst();
+            return new Iterator<V>() {
+                boolean hasNext = initialHasNext;
+
+                public boolean hasNext() {
+                    return hasNext;
+                }
+
+                @Override
+                public V next() {
+                    if (!hasNext) throw new IllegalStateException("No more elements");
+
+                    final V value = cursor.getValue();
+                    hasNext = cursor.moveNext();
+                    if (!hasNext) {
+                        cursor.close();
+                    }
+                    return value;
+                }
+            };
+        }
+
         public Iterator<Pair<K, V>> keyValues(Transaction tx) {
             final Cursor<K, V> cursor = createCursor(tx);
             final boolean initialHasNext = cursor.moveFirst();
@@ -738,7 +800,117 @@ public class Loader {
         }
     }
 
-    private static class Pair<K, V> {
+    static class IndexWithDuplicateKeys<K, V> extends Index<K, V> {
+        public IndexWithDuplicateKeys(Database db, long dbi, Schema<K> kSchema, Schema<V> vSchema) {
+            super(db, dbi, kSchema, vSchema);
+        }
+
+        public CursorWithDuplicateKeys<K, V> createCursor(Transaction tx) {
+            final long[] cursorPtr = new long[1];
+            Util.checkErrorCode(JNI.mdb_cursor_open(tx.txn, dbi, cursorPtr));
+            return new CursorWithDuplicateKeys<>(this, cursorPtr[0]);
+        }
+
+        // Override the base class because MDB_RESERVE doesn't really make sense with MDB_DUPSORT
+        @Override
+        public void put(Transaction tx, K k, V v) {
+            final int kSz = bitsToBytes(kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(vSchema.sizeBits(v));
+
+            final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
+            fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, vSz);
+            fillBufferPointerFromSchema(vSchema, vBufferPtrNow, vSz, v);
+            try {
+                Util.checkErrorCode(JNI.mdb_put(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow, 0));
+            } finally {
+                freeBufferPointer(vBufferPtr, vBufferPtrNow);
+                freeBufferPointer(kBufferPtr, kBufferPtrNow);
+            }
+        }
+
+        // Override because MDB_RESERVE doesn't work, and need to use MDB_NODUPDATA rather than MDB_NOOVERWRITE
+        @Override
+        public V putIfAbsent(Transaction tx, K k, V v) {
+            final int kSz = bitsToBytes(kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(vSchema.sizeBits(v));
+
+            final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
+            fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, vSz);
+            fillBufferPointerFromSchema(vSchema, vBufferPtrNow, vSz, v);
+            try {
+                final int rc = JNI.mdb_put(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow, JNI.MDB_NODUPDATA);
+                if (rc == JNI.MDB_KEYEXIST) {
+                    return v;
+                } else {
+                    Util.checkErrorCode(rc);
+                    return null;
+                }
+            } finally {
+                freeBufferPointer(vBufferPtr, vBufferPtrNow);
+                freeBufferPointer(kBufferPtr, kBufferPtrNow);
+            }
+        }
+
+        public boolean remove(Transaction tx, K k, V v) {
+            final int kSz = bitsToBytes(kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(vSchema.sizeBits(v));
+
+            final long kBufferPtrNow = allocateBufferPointer(kBufferPtr, kSz);
+            fillBufferPointerFromSchema(kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = allocateBufferPointer(vBufferPtr, vSz);
+            fillBufferPointerFromSchema(vSchema, vBufferPtrNow, vSz, v);
+            try {
+                int rc = JNI.mdb_del(tx.txn, dbi, kBufferPtrNow, vBufferPtrNow);
+                if (rc == JNI.MDB_NOTFOUND) {
+                    return false;
+                } else {
+                    Util.checkErrorCode(rc);
+                    return true;
+                }
+            } finally {
+                freeBufferPointer(vBufferPtr, vBufferPtrNow);
+                freeBufferPointer(kBufferPtr, kBufferPtrNow);
+            }
+        }
+
+        public boolean contains(Transaction tx, K k, V v) {
+            // Unfortunately when using MDB_DUPSORT mdb_get ignores the data parameter and just
+            // returns the first value associated with a key.
+            try (CursorWithDuplicateKeys<K, V> cursor = createCursor(tx)) {
+                return cursor.moveTo(k, v);
+            }
+        }
+
+        // Override the base class so that we don't get duplicate keys in the iterator
+        @Override
+        public Iterator<K> keys(Transaction tx) {
+            final CursorWithDuplicateKeys<K, V> cursor = createCursor(tx);
+            final boolean initialHasNext = cursor.moveFirst();
+            return new Iterator<K>() {
+                boolean hasNext = initialHasNext;
+
+                public boolean hasNext() {
+                    return hasNext;
+                }
+
+                @Override
+                public K next() {
+                    if (!hasNext) throw new IllegalStateException("No more elements");
+
+                    final K key = cursor.getKey();
+                    hasNext = cursor.moveFirstOfNextKey();
+                    if (!hasNext) {
+                        cursor.close();
+                    }
+                    return key;
+                }
+            };
+        }
+    }
+
+    public final static class Pair<K, V> {
         final K k;
         final V v;
 
@@ -746,10 +918,18 @@ public class Loader {
             this.k = k;
             this.v = v;
         }
+
+        public boolean equals(Object thatObject) {
+            if (!(thatObject instanceof Pair)) {
+                return false;
+            } else {
+                Pair that = (Pair)thatObject;
+                return Objects.equals(this.k, that.k) && Objects.equals(this.v, that.v);
+            }
+        }
     }
 
     // XXX: type specialisation for true 0-allocation? But we might hope that escape analysis would save us because our boxes are intermediate only.
-    // TODO: duplicate item support
     static class Cursor<K, V> implements AutoCloseable {
         final Index<K, V> index;
         final long cursor;
@@ -771,7 +951,7 @@ public class Loader {
             this.bufferPtr = unsafe.allocateMemory(4 * Unsafe.ADDRESS_SIZE);
         }
 
-        private boolean isFound(int rc) {
+        protected boolean isFound(int rc) {
             if (rc == JNI.MDB_NOTFOUND) {
                 return false;
             } else {
@@ -780,8 +960,8 @@ public class Loader {
             }
         }
 
-        private boolean move(int op) {
-            boolean result = isFound(JNI.mdb_cursor_get_so_raw_it_hurts(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, op));
+        protected boolean move(int op) {
+            boolean result = isFound(JNI.mdb_cursor_get(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, op));
             bufferPtrStale = false;
             return result;
         }
@@ -799,7 +979,7 @@ public class Loader {
             final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
             index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
             try {
-                return isFound(JNI.mdb_cursor_get_so_raw_it_hurts(cursor, kBufferPtrNow, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, op));
+                return isFound(JNI.mdb_cursor_get(cursor, kBufferPtrNow, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, op));
             } finally {
                 // Need to copy the MDB_val from the temp structure to the permanent one, in case someone does getKey() now (they should get back k)
                 unsafe.putAddress(bufferPtr,                       unsafe.getAddress(kBufferPtrNow));
@@ -816,28 +996,36 @@ public class Loader {
             return (moveCeiling(k) && keyEquals(k)) || movePrevious();
         }
 
-        private boolean keyEquals(K k) {
+        protected boolean keyEquals(K k) {
+            return keyValueEquals(k, 0, index.kSchema, index.kBufferPtr);
+        }
+
+        protected boolean valueEquals(V v) {
+            return keyValueEquals(v, 2 * Unsafe.ADDRESS_SIZE, index.vSchema, index.vBufferPtr);
+        }
+
+        private <T> boolean keyValueEquals(T kv, int byteOffsetFromBufferPtr, Schema<T> schema, long scratchBufferPtr) {
             if (bufferPtrStale) { refresh(); }
 
-            final int kSz = bitsToBytes(index.kSchema.sizeBits(k));
-            if (kSz != unsafe.getAddress(bufferPtr)) {
+            final int sz = bitsToBytes(schema.sizeBits(kv));
+            if (sz != unsafe.getAddress(bufferPtr + byteOffsetFromBufferPtr)) {
                 return false;
             }
 
-            final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
-            index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            final long bufferPtrNow = Index.allocateBufferPointer(scratchBufferPtr, sz);
+            index.fillBufferPointerFromSchema(schema, bufferPtrNow, sz, kv);
             try {
-                final long ourKeyPtr   = unsafe.getAddress(bufferPtr + Unsafe.ADDRESS_SIZE);
-                final long theirKeyPtr = kBufferPtrNow + 2 * Unsafe.ADDRESS_SIZE;
-                for (int i = 0; i < kSz; i++) {
-                    if (unsafe.getByte(ourKeyPtr + i) != unsafe.getByte(theirKeyPtr + i)) {
+                final long ourPtr   = unsafe.getAddress(bufferPtr + byteOffsetFromBufferPtr + Unsafe.ADDRESS_SIZE);
+                final long theirPtr = bufferPtrNow + 2 * Unsafe.ADDRESS_SIZE;
+                for (int i = 0; i < sz; i++) {
+                    if (unsafe.getByte(ourPtr + i) != unsafe.getByte(theirPtr + i)) {
                         return false;
                     }
                 }
 
                 return true;
             } finally {
-                Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
+                Index.freeBufferPointer(scratchBufferPtr, bufferPtrNow);
             }
         }
 
@@ -859,7 +1047,7 @@ public class Loader {
             final int vSz = bitsToBytes(index.vSchema.sizeBits(v));
 
             unsafe.putAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, vSz);
-            Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, JNI.MDB_CURRENT | JNI.MDB_RESERVE));
+            Util.checkErrorCode(JNI.mdb_cursor_put(cursor, bufferPtr, bufferPtr + 2 * Unsafe.ADDRESS_SIZE, JNI.MDB_CURRENT | JNI.MDB_RESERVE));
             index.bs.initialize(unsafe.getAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE), vSz);
             index.vSchema.write(index.bs, v);
             index.bs.zeroFill();
@@ -877,26 +1065,170 @@ public class Loader {
             final long vBufferPtrNow = Index.allocateBufferPointer(index.vBufferPtr, vSz);
             unsafe.putAddress(vBufferPtrNow, vSz);
             try {
-                Util.checkErrorCode(JNI.mdb_cursor_put_raw(cursor, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
+                Util.checkErrorCode(JNI.mdb_cursor_put(cursor, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE));
                 index.bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz);
                 index.vSchema.write(index.bs, v);
+                index.bs.zeroFill();
             } finally {
                 Index.freeBufferPointer(index.vBufferPtr, vBufferPtrNow);
                 Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
+                bufferPtrStale = true;
             }
+        }
 
-            bufferPtrStale = true;
+        public V putIfAbsent(K k, V v) {
+            final int kSz = bitsToBytes(index.kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(index.vSchema.sizeBits(v));
+
+            final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
+            index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = Index.allocateBufferPointer(index.vBufferPtr, vSz);
+            unsafe.putAddress(vBufferPtrNow, vSz);
+            try {
+                final int rc = JNI.mdb_cursor_put(cursor, kBufferPtrNow, vBufferPtrNow, JNI.MDB_RESERVE | JNI.MDB_NOOVERWRITE);
+                if (rc == JNI.MDB_KEYEXIST) {
+                    index.bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), (int)unsafe.getAddress(vBufferPtrNow));
+                    return index.vSchema.read(index.bs);
+                } else {
+                    Util.checkErrorCode(rc);
+                    index.bs.initialize(unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE), vSz);
+                    index.vSchema.write(index.bs, v);
+                    index.bs.zeroFill();
+                    return null;
+                }
+            } finally {
+                Index.freeBufferPointer(index.vBufferPtr, vBufferPtrNow);
+                Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
+                bufferPtrStale = true;
+            }
         }
 
         public void delete() {
             Util.checkErrorCode(JNI.mdb_cursor_del(cursor, 0));
-
             bufferPtrStale = true;
         }
 
         public void close() {
             unsafe.freeMemory(bufferPtr);
             JNI.mdb_cursor_close(cursor);
+        }
+    }
+
+    static class CursorWithDuplicateKeys<K, V> extends Cursor<K, V> {
+        public CursorWithDuplicateKeys(IndexWithDuplicateKeys<K, V> index, long cursor) {
+            super(index, cursor);
+        }
+
+        public boolean moveFirstOfKey()        { return move(JNI.MDB_FIRST_DUP); }
+        public boolean moveLastOfKey()         { return move(JNI.MDB_LAST_DUP); }
+        public boolean moveNextOfKey()         { return move(JNI.MDB_NEXT_DUP); }
+        public boolean movePreviousOfKey()     { return move(JNI.MDB_PREV_DUP); }
+        public boolean moveFirstOfNextKey()    { return move(JNI.MDB_NEXT_NODUP); }
+        public boolean moveLastOfPreviousKey() { return move(JNI.MDB_PREV_NODUP); }
+
+        public boolean moveTo(K k, V v)           { return move(k, v, JNI.MDB_GET_BOTH); }
+        public boolean moveCeilingOfKey(K k, V v) { return move(k, v, JNI.MDB_GET_BOTH_RANGE); }
+
+        public boolean moveFloorOfKey(K k, V v) {
+            if (moveCeilingOfKey(k, v)) {
+                return valueEquals(v) || movePreviousOfKey();
+            } else {
+                return moveTo(k) && moveLastOfKey();
+            }
+        }
+
+        public long keyItemCount() {
+            final long[] output = new long[1];
+            Util.checkErrorCode(JNI.mdb_cursor_count(cursor, output));
+            return output[0];
+        }
+
+        private boolean move(K k, V v, int op) {
+            final int kSz = bitsToBytes(index.kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(index.vSchema.sizeBits(v));
+
+            final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
+            index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = Index.allocateBufferPointer(index.vBufferPtr, vSz);
+            index.fillBufferPointerFromSchema(index.vSchema, vBufferPtrNow, vSz, v);
+            try {
+                return isFound(JNI.mdb_cursor_get(cursor, kBufferPtrNow, vBufferPtrNow, op));
+            } finally {
+                // Need to copy the MDB_vals from the temp structure to the permanent one, in case someone does getKey() now (they should get back k)
+                unsafe.putAddress(bufferPtr,                           unsafe.getAddress(kBufferPtrNow));
+                unsafe.putAddress(bufferPtr +     Unsafe.ADDRESS_SIZE, unsafe.getAddress(kBufferPtrNow + Unsafe.ADDRESS_SIZE));
+                unsafe.putAddress(bufferPtr + 2 * Unsafe.ADDRESS_SIZE, unsafe.getAddress(vBufferPtrNow));
+                unsafe.putAddress(bufferPtr + 3 * Unsafe.ADDRESS_SIZE, unsafe.getAddress(vBufferPtrNow + Unsafe.ADDRESS_SIZE));
+                bufferPtrStale = false;
+                Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
+            }
+        }
+
+        // Override the base class because MDB_RESERVE doesn't really make sense with duplicates
+        @Override
+        public void put(K k, V v) {
+            final int kSz = bitsToBytes(index.kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(index.vSchema.sizeBits(v));
+
+            final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
+            index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = Index.allocateBufferPointer(index.vBufferPtr, vSz);
+            index.fillBufferPointerFromSchema(index.vSchema, vBufferPtrNow, vSz, v);
+            try {
+                Util.checkErrorCode(JNI.mdb_cursor_put(cursor, kBufferPtrNow, vBufferPtrNow, 0));
+            } finally {
+                Index.freeBufferPointer(index.vBufferPtr, vBufferPtrNow);
+                Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
+                bufferPtrStale = true;
+            }
+        }
+
+        // Override the base class because MDB_RESERVE doesn't really make sense with duplicates
+        @Override
+        public V putIfAbsent(K k, V v) {
+            final int kSz = bitsToBytes(index.kSchema.sizeBits(k));
+            final int vSz = bitsToBytes(index.vSchema.sizeBits(v));
+
+            final long kBufferPtrNow = Index.allocateBufferPointer(index.kBufferPtr, kSz);
+            index.fillBufferPointerFromSchema(index.kSchema, kBufferPtrNow, kSz, k);
+            final long vBufferPtrNow = Index.allocateBufferPointer(index.vBufferPtr, vSz);
+            index.fillBufferPointerFromSchema(index.vSchema, vBufferPtrNow, vSz, v);
+            try {
+                final int rc = JNI.mdb_cursor_put(cursor, kBufferPtrNow, vBufferPtrNow, JNI.MDB_NODUPDATA);
+                if (rc == JNI.MDB_KEYEXIST) {
+                    return v;
+                } else {
+                    Util.checkErrorCode(rc);
+                    return null;
+                }
+            } finally {
+                Index.freeBufferPointer(index.vBufferPtr, vBufferPtrNow);
+                Index.freeBufferPointer(index.kBufferPtr, kBufferPtrNow);
+                bufferPtrStale = true;
+            }
+        }
+
+        // Override the base class because MDB_RESERVE doesn't really make sense with duplicates.
+        // Furthermore, MDB_CURRENT isn't actually useful for anything when using MDB_DUPSORT!
+        @Override
+        public void put(V v) {
+            if (bufferPtrStale) { refresh(); }
+
+            final int vSz = bitsToBytes(index.vSchema.sizeBits(v));
+
+            final long vBufferPtrNow = Index.allocateBufferPointer(index.vBufferPtr, vSz);
+            index.fillBufferPointerFromSchema(index.vSchema, vBufferPtrNow, vSz, v);
+            try {
+                Util.checkErrorCode(JNI.mdb_cursor_put(cursor, bufferPtr, vBufferPtrNow, 0));
+            } finally {
+                Index.freeBufferPointer(index.vBufferPtr, vBufferPtrNow);
+                bufferPtrStale = true;
+            }
+        }
+
+        public void deleteAllOfKey() {
+            Util.checkErrorCode(JNI.mdb_cursor_del(cursor, JNI.MDB_NODUPDATA));
+            bufferPtrStale = true;
         }
     }
 

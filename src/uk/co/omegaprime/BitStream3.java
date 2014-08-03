@@ -35,6 +35,8 @@ public class BitStream3 {
         this.bitOffset = 0;
     }
 
+    // Fill any remaining bits of this byte with zeros.
+    // Particularly important to do this when writing keys or we won't be able to get the values we put!
     public void zeroFill() {
         if (bitOffset != 0) {
             unsafe.putByte(ptr, (byte)(unsafe.getByte(ptr) & (0xFF << (8 - bitOffset))));
