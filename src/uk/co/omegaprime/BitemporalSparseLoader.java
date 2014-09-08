@@ -332,38 +332,6 @@ public class BitemporalSparseLoader {
         public LocalDate getDate() { return date; }
     }
 
-    private static <T> T putSparseSourceTemporalCursor(Cursor<SourceTemporalFieldKey, SparseSourceTemporalFieldValue<T>> cursor, int maxSourceID, int sourceID, String idBBGlobal, T value) {
-        // FIXME: deal with the case where value is null.. could overload it to mean "delete"?
-
-        final SourceTemporalFieldKey key = new SourceTemporalFieldKey(idBBGlobal, sourceID);
-        if (cursor.moveFloor(key)) {
-            final SourceTemporalFieldKey existingKey = cursor.getKey();
-            if (existingKey.getIDBBGlobal().equals(idBBGlobal)) {
-                final SparseSourceTemporalFieldValue<T> existingValue = cursor.getValue();
-                int effectiveSourceTo = existingValue.getToSourceID() == null ? maxSourceID+1 : existingValue.getToSourceID();
-                if (effectiveSourceTo > sourceID) {
-                    // There is an existing entry in the DB covering the product and source that we are trying to insert
-                    if (!existingValue.getValue().equals(value)) {
-                        // TODO: any way of optimising insertion after current subcursor location?
-                        if (sourceID > existingKey.getSourceID()) {
-                            cursor.put(new SparseSourceTemporalFieldValue<T>(sourceID, existingValue.getValue()));
-                        } else {
-                            cursor.delete();
-                        }
-                        cursor.put(key, new SparseSourceTemporalFieldValue<T>(sourceID == maxSourceID ? null : sourceID+1, value));
-                        if (effectiveSourceTo > sourceID + 1) {
-                            cursor.put(new SourceTemporalFieldKey(idBBGlobal, sourceID + 1), existingValue);
-                        }
-                    }
-                    return existingValue.getValue();
-                }
-            }
-        }
-
-        cursor.put(key, new SparseSourceTemporalFieldValue<T>(null, value));
-        return null;
-    }
-
     private static LocalDate maxDate(LocalDate a, LocalDate b) {
         if (a == null) return b;
         if (b == null) return a;
