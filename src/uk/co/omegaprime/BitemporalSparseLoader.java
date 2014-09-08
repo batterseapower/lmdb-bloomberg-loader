@@ -9,6 +9,7 @@ import java.io.InputStreamReader;
 import java.time.LocalDate;
 import java.util.HashSet;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.zip.ZipInputStream;
 
 public class BitemporalSparseLoader {
@@ -51,6 +52,9 @@ public class BitemporalSparseLoader {
         public T getValue() { return value; }
     }
 
+    // TODO: the interface of this is inconsistent with SparseTemporalCursor. With STC you setPosition
+    // but don't learn about whether you are positioned or not until you actually do an operation,
+    // with this one you moveTo and then immediately learn whether you are positioned or not.
     public static class SparseSourceTemporalCursor<V> {
         private final Cursor<SourceTemporalFieldKey, SparseSourceTemporalFieldValue<V>> cursor;
         private final SubcursorView<String, Integer, SparseSourceTemporalFieldValue<V>> subcursor;
@@ -66,7 +70,7 @@ public class BitemporalSparseLoader {
 
         public boolean moveTo(String idBBGlobal) {
             positioned = false;
-            subcursor.reposition(idBBGlobal);
+            subcursor.setPosition(idBBGlobal);
 
             if (subcursor.moveFloor(currentSourceID)) {
                 final SparseSourceTemporalFieldValue<V> value = subcursor.getValue();
@@ -121,8 +125,7 @@ public class BitemporalSparseLoader {
         private boolean scanForwardForAlive() {
             do {
                 if (isAlive()) {
-                    // TODO: this causes us to seek "cursor" again, needlessly. Make more efficient?
-                    subcursor.reposition(cursor.getKey().getIDBBGlobal());
+                    subcursor.setPosition(cursor.getKey().getIDBBGlobal());
                     return true;
                 }
             } while (cursor.moveNext());
@@ -178,23 +181,137 @@ public class BitemporalSparseLoader {
         }
 
         public LocalDate getToDate() { return toDate; }
-        public Integer getToSourceID() { return toSourceID; }
+        public Integer getToSourceID() { return toSourceID; } // Invariant: must not be greater than the maximum source ID
         public V getValue() { return value; }
 
         public SparseTemporalFieldValue<V> setToDate(LocalDate toDate) { return new SparseTemporalFieldValue<>(toDate, toSourceID, value); }
+
+        // NB: assumes that LKD is a monotonically increasing function of sourceID
+        //
+        // NB: this is an estimate in that it may return a maximum that is higher than the true value: it is guaranteed
+        // to never return one lower than the true value. (This can happen when toSourceID < the maximum source ID, in
+        // which case our maxAchievableLKD may be higher than what is achievable in reality since we only work with the
+        // penultimateSourceLKD here rather than the full mapping from source ID to LKD.)
+        public LocalDate estimateMaximumToDate(LocalDate penultimateSourceLKD, LocalDate maxSourceLKD) {
+            if (maxSourceLKD == null) throw new IllegalArgumentException("maxSourceLKD argument must not be null, though penultimateSourceLKD may be");
+
+            final LocalDate maxAchievableLKD = (toSourceID == null || penultimateSourceLKD == null) ? maxSourceLKD : penultimateSourceLKD;
+            return (toDate == null || maxAchievableLKD.isBefore(toDate)) ? maxAchievableLKD : toDate;
+        }
     }
 
     public static class SparseTemporalCursor<V> {
         private final Cursor<TemporalFieldKey, SparseTemporalFieldValue<V>> cursor;
         private final int currentSourceID;
         private final SubcursorView<String, Pair<LocalDate, Integer>, SparseTemporalFieldValue<V>> subcursor;
-        private final SubcursorView<Pair<String, LocalDate>, Integer, SparseTemporalFieldValue<V>> dateSubcursor;
+        private final Cursorlike<Pair<LocalDate, Integer>, SparseTemporalFieldValue<V>> subcursorForCurrentSourceID;
+
+        private LocalDate lastKnownDate;
+        private LocalDate priorLastKnownDate;
 
         public SparseTemporalCursor(Cursor<TemporalFieldKey, SparseTemporalFieldValue<V>> cursor, int currentSourceID) {
-            this.cursor = cursor;
-            this.currentSourceID = currentSourceID;
-            this.subcursor     = new SubcursorView<>(cursor, ID_BB_GLOBAL_SCHEMA, Schema.zip(LocalDateSchema.INSTANCE, SOURCE_ID_SCHEMA));
-            this.dateSubcursor = new SubcursorView<>(cursor, Schema.zip(ID_BB_GLOBAL_SCHEMA, LocalDateSchema.INSTANCE), SOURCE_ID_SCHEMA);
+            this.cursor                      = cursor;
+            this.currentSourceID             = currentSourceID;
+            this.subcursor                   = new SubcursorView<>(cursor, ID_BB_GLOBAL_SCHEMA, Schema.zip(LocalDateSchema.INSTANCE, SOURCE_ID_SCHEMA));
+            this.subcursorForCurrentSourceID = new FilteredView<>(subcursor, this::isValidAtCurrentSource);
+        }
+
+        private boolean isValidAtCurrentSource(Pair<LocalDate, Integer> key, SparseTemporalFieldValue<V> value) {
+            return key.v <= currentSourceID && (value.toSourceID == null || value.toSourceID > currentSourceID);
+        }
+
+        public void setPosition(String idBBGlobal, LocalDate priorLastKnownDate, LocalDate lastKnownDate) {
+            this.subcursor.setPosition(idBBGlobal);
+            this.priorLastKnownDate = priorLastKnownDate;
+            this.lastKnownDate = lastKnownDate;
+        }
+
+        public boolean moveTo(LocalDate date) {
+            if (!this.subcursorForCurrentSourceID.moveFloor(new Pair<>(date, currentSourceID))) {
+                return false;
+            } else {
+                final LocalDate toDate = this.subcursorForCurrentSourceID.getValue().getToDate();
+                return toDate == null || toDate.isAfter(date);
+            }
+        }
+
+        public void put(LocalDate date, V value) {
+            putDelete(date, Maybe.of(value));
+        }
+
+        public void delete(LocalDate date) {
+            putDelete(date, Maybe.empty());
+        }
+
+        // TODO: currently this assumes that the currentSourceID is the maximum one. Should document that this is the only supported mode. (get maybe could support more though?)
+        private void putDelete(LocalDate date, Maybe<V> value) {
+            if (subcursor.moveFloor(new Pair<>(date, currentSourceID))) {
+                boolean found = false;
+                Pair<LocalDate, Integer> existingFieldKey;
+                SparseTemporalFieldValue<V> existingFieldValue = null;
+                do {
+                    existingFieldKey = subcursor.getKey();
+                    if (subcursor.getKey().k.isAfter(date)) {
+                        break;
+                    }
+
+                    existingFieldValue = cursor.getValue();
+                    if (existingFieldValue.getToDate() == null || existingFieldValue.getToDate().isAfter(date)) {
+                        if (existingFieldValue.getToSourceID() == null) {
+                            found = true;
+                            break;
+                        }
+                    }
+                } while (subcursor.moveNext());
+
+                if (found) {
+                    if (value.isPresent() && existingFieldValue.getValue().equals(value.get())) {
+                        return;
+                    }
+
+                    // This range intersects the date we are trying to add
+                    //
+                    // We already have a tuple in the DB of the form (FromSource, ToSource, FromDate, ToDate):
+                    //  (S_f, null, F, T) -> v
+                    // We need to split this into at most 4 tuples:
+                    //  1. (S_f, null, F,   D) -> v
+                    //  2. (S_f, null, D+1, T) -> v
+                    //  3. (S_f, S,    D, D+1) -> v
+                    //  4. (S,   null, D, D+1) -> v'
+                    // Where:
+                    //  a) Any tuple may be omitted if FromDate >= min(ToDate, max(LKBD( [FromSource, ISNULL(ToSource, S)) ))
+                    //  b) The D+1 ToDate for tuple 3 may be set to null if D+1 is > max(LKBD( [FromSource, S) ))
+                    //  c) Tuple 3 may be omitted if S_f >= S
+                    //  d) The D+1 ToDate for tuple 4 may be set to null if D+1 is > the LKBD for S
+                    {
+                        // Tuple 1
+                        final SparseTemporalFieldValue<V> proposedValue = new SparseTemporalFieldValue<>(date, null, existingFieldValue.getValue());
+                        if (existingFieldKey.k.isBefore(proposedValue.estimateMaximumToDate(priorLastKnownDate, lastKnownDate))) {
+                            subcursor.put(proposedValue);
+                        } else {
+                            subcursor.delete();
+                        }
+                    }
+                    // Tuple 2
+                    if (date.plusDays(1).isBefore(existingFieldValue.estimateMaximumToDate(priorLastKnownDate, lastKnownDate))) {
+                        subcursor.put(new Pair<>(date.plusDays(1), existingFieldKey.v),
+                                      existingFieldValue);
+                    }
+                    // Tuple 3
+                    if (existingFieldKey.v < currentSourceID) {
+                        final LocalDate proposedToDate = date.isBefore(priorLastKnownDate) ? date.plusDays(1) : null;
+                        subcursor.put(new Pair<>(date, existingFieldKey.v),
+                                      new SparseTemporalFieldValue<V>(proposedToDate, currentSourceID, existingFieldValue.getValue()));
+                    }
+                }
+            }
+
+            // Tuple 4
+            if (value.isPresent()) {
+                final LocalDate proposedToDate = date.isBefore(lastKnownDate) ? date.plusDays(1) : null;
+                subcursor.put(new Pair<>(date, currentSourceID),
+                              new SparseTemporalFieldValue<V>(proposedToDate, null, value.get()));
+            }
         }
     }
 
@@ -265,7 +382,6 @@ public class BitemporalSparseLoader {
         final int sourceID = sourceCursor.moveLast() ? sourceCursor.getKey() + 1 : 0;
         sourceCursor.put(sourceID, new Source(delivery, date));
 
-        // FIXME: handle updating of these
         final SparseSourceTemporalCursor<String>    lastKnownDeliveryCursor     = new SparseSourceTemporalCursor<>(db.createIndex(tx, "LastKnownDelivery",     SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(new Latin1StringSchema(10))).createCursor(tx), sourceID);
         final SparseSourceTemporalCursor<LocalDate> itemLastKnownDateCursor     = new SparseSourceTemporalCursor<>(db.createIndex(tx, "ItemLastKnownDate",     SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)  ).createCursor(tx), sourceID);
         final SparseSourceTemporalCursor<LocalDate> deliveryLastKnownDateCursor = new SparseSourceTemporalCursor<>(db.createIndex(tx, "DeliveryLastKnownDate", SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)  ).createCursor(tx), sourceID); // Actually keyed by delivery, not ID_BB_GLOBAL
@@ -286,17 +402,17 @@ public class BitemporalSparseLoader {
         // but we don't want to reduce the LKD for this idBBGlobal.
 
         deliveryLastKnownDateCursor.moveTo(delivery);
-        final LocalDate deliveryOldLastKnownDate = deliveryLastKnownDateCursor.put(date);
+        final LocalDate deliveryPriorLastKnownDate = deliveryLastKnownDateCursor.put(date);
 
         int idBBGlobalIx = -1;
-        final Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>>[] cursors = (Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>>[]) new Cursor[headers.length];
+        final SparseTemporalCursor<String>[] cursors = (SparseTemporalCursor<String>[]) new SparseTemporalCursor[headers.length];
         for (int i = 0; i < headers.length; i++) {
             if (headers[i].equals("ID_BB_GLOBAL")) {
                 idBBGlobalIx = i;
             } else {
                 final String indexName = headers[i].replace(" ", "");
                 final Index<TemporalFieldKey, SparseTemporalFieldValue<String>> index = db.createIndex(tx, indexName, TemporalFieldKey.SCHEMA, SparseTemporalFieldValue.schema(new Latin1StringSchema(64)));
-                cursors[i] = index.createCursor(tx);
+                cursors[i] = new SparseTemporalCursor<>(index.createCursor(tx), sourceID);
             }
         }
 
@@ -321,76 +437,29 @@ public class BitemporalSparseLoader {
 
             lastKnownDeliveryCursor.moveTo(idBBGlobal);
             final String oldDelivery = lastKnownDeliveryCursor.put(delivery);
-            final LocalDate oldDeliveryLastKnownDate = (oldDelivery != null && deliveryLastKnownDateCursor.moveTo(oldDelivery)) ? deliveryLastKnownDateCursor.getValue() : null;
-            final LocalDate priorLastKnownDate       = maxDate(oldDeliveryLastKnownDate, itemLastKnownDate);
-            final LocalDate lastKnownDate            = maxDate(priorLastKnownDate, date);
+            final LocalDate oldDeliveryPriorLastKnownDate
+                = delivery.equals(oldDelivery)                                             ? deliveryPriorLastKnownDate
+                : (oldDelivery != null && deliveryLastKnownDateCursor.moveTo(oldDelivery)) ? deliveryLastKnownDateCursor.getValue()
+                : null;
+            final LocalDate priorLastKnownDate = maxDate(oldDeliveryPriorLastKnownDate, itemLastKnownDate);
+            final LocalDate lastKnownDate      = maxDate(priorLastKnownDate, date);
             if (oldDelivery != null && !delivery.equals(oldDelivery) && priorLastKnownDate != null) {
                 itemLastKnownDateCursor.put(priorLastKnownDate);
             }
 
-            final TemporalFieldKey fieldKey = new TemporalFieldKey(idBBGlobal, date, sourceID);
             for (int i = 0; i < headers.length; i++) {
                 if (i == idBBGlobalIx) continue;
 
-                final Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> cursor = cursors[i];
+                final SparseTemporalCursor<String> cursor = cursors[i];
                 final String value = line[i].trim();
 
                 items++;
 
-                if (cursor.moveFloor(fieldKey)) {
-                    boolean found = false;
-                    TemporalFieldKey existingFieldKey;
-                    SparseTemporalFieldValue existingFieldValue = null;
-                    do {
-                        existingFieldKey = cursor.getKey();
-                        if (!existingFieldKey.idBBGlobal.equals(fieldKey.idBBGlobal) || cursor.getKey().date.isAfter(date)) {
-                            break;
-                        }
-
-                        existingFieldValue = cursor.getValue();
-                        if (existingFieldValue.getToDate() == null || existingFieldValue.getToDate().isAfter(date)) {
-                            if (existingFieldValue.getToSourceID() == null) {
-                                found = true;
-                                break;
-                            }
-                        }
-                    } while (cursor.moveNext());
-
-                    if (found) {
-                        if (existingFieldValue.getValue().equals(value)) {
-                            continue;
-                        }
-
-                        // This range intersects the date we are trying to add
-                        //
-                        // We already have a tuple in the DB of the form (FromSource, ToSource, FromDate, ToDate):
-                        //  (S_f, null, F, T) -> v
-                        // We need to split this into at most 4 tuples:
-                        //  1. (S_f, null, F,   D) -> v
-                        //  2. (S_f, null, D+1, T) -> v
-                        //  3. (S_f, S,    D, D+1) -> v
-                        //  4. (S,   null, D, D+1) -> v'
-                        // Where:
-                        //  a) TODO (only have a weak version comparing to ToDate right now): Any tuple may be omitted if FromDate >= min(ToDate, max(LKBD( [FromSource, ISNULL(ToSource, S)) ))
-                        //  b) TODO: The D+1 ToDate for 3. may be set to null if D+1 is > max(LKBD( [FromSource, S) ))
-                        //  c) The D+1 ToDate for 4. may be set to null if D+1 is > the LKBD for S
-                        if (existingFieldValue.getToDate() == null || date.isBefore(existingFieldValue.getToDate())) {
-                            cursor.put(new SparseTemporalFieldValue(date, null, existingFieldValue.getValue()));
-                        } else {
-                            cursor.delete();
-                        }
-                        if (existingFieldValue.getToDate() == null || date.plusDays(1).isBefore(existingFieldValue.getToDate())) {
-                            cursor.put(new TemporalFieldKey(idBBGlobal, date.plusDays(1), existingFieldKey.getSourceID()),
-                                       existingFieldValue);
-                        }
-                        cursor.put(new TemporalFieldKey(idBBGlobal, date, existingFieldKey.getSourceID()),
-                                   new SparseTemporalFieldValue(date.plusDays(1), sourceID, existingFieldValue.getValue()));
-                    }
-                }
-
+                cursor.setPosition(idBBGlobal, priorLastKnownDate, lastKnownDate);
                 if (value.length() != 0) {
-                    cursor.put(new TemporalFieldKey(idBBGlobal, date, sourceID),
-                               new SparseTemporalFieldValue(date.isBefore(lastKnownDate) ? date.plusDays(1) : null, null, value));
+                    cursor.put(date, value);
+                } else {
+                    cursor.delete(date);
                 }
             }
         }
@@ -416,7 +485,7 @@ public class BitemporalSparseLoader {
 
                 lastKnownDeliveryCursor.put(null);
                 itemLastKnownDateCursor.moveTo(idBBGlobal);
-                itemLastKnownDateCursor.put(deliveryOldLastKnownDate);
+                itemLastKnownDateCursor.put(deliveryPriorLastKnownDate);
             } while (lastKnownDeliveryCursor.moveNext());
         }
 
