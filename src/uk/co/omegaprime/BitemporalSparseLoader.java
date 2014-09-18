@@ -5,12 +5,10 @@ import uk.co.omegaprime.thunder.*;
 import uk.co.omegaprime.thunder.schema.*;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.time.LocalDate;
-import java.util.HashSet;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.zip.ZipInputStream;
+import java.util.*;
 
 public class BitemporalSparseLoader {
     private static final Schema<String> ID_BB_GLOBAL_SCHEMA = new Latin1StringSchema(20);
@@ -231,7 +229,8 @@ public class BitemporalSparseLoader {
                 return false;
             } else {
                 final LocalDate toDate = this.subcursorForCurrentSourceID.getValue().getToDate();
-                return toDate == null || toDate.isAfter(date);
+                // FIXME: toDate == null case suspect -- should use the LKD from the associated source range, not just a generic LKD!
+                return (toDate == null ? priorLastKnownDate.plusDays(1) : toDate).isAfter(date);
             }
         }
 
@@ -256,7 +255,8 @@ public class BitemporalSparseLoader {
                     }
 
                     existingFieldValue = cursor.getValue();
-                    if (existingFieldValue.getToDate() == null || existingFieldValue.getToDate().isAfter(date)) {
+                    // FIXME: toDate == null case suspect -- should use the LKD from the associated source range, not just a generic LKD!
+                    if ((existingFieldValue.getToDate() == null ? priorLastKnownDate.plusDays(1) : existingFieldValue.getToDate()).isAfter(date)) {
                         if (existingFieldValue.getToSourceID() == null) {
                             found = true;
                             break;
@@ -315,6 +315,43 @@ public class BitemporalSparseLoader {
         }
     }
 
+    private static class LKDCursors implements AutoCloseable {
+        final SparseSourceTemporalCursor<String>    lastKnownDeliveryCursor;
+        final SparseSourceTemporalCursor<LocalDate> itemLastKnownDateCursor;
+        final SparseSourceTemporalCursor<LocalDate> deliveryLastKnownDateCursor;
+
+        public LKDCursors(Database db, Transaction tx, int sourceID) {
+            this.lastKnownDeliveryCursor     = new SparseSourceTemporalCursor<>(db.createIndex(tx, "LastKnownDelivery",     SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(new Latin1StringSchema(10))).createCursor(tx), sourceID);
+            this.itemLastKnownDateCursor     = new SparseSourceTemporalCursor<>(db.createIndex(tx, "ItemLastKnownDate",     SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)  ).createCursor(tx), sourceID);
+            this.deliveryLastKnownDateCursor = new SparseSourceTemporalCursor<>(db.createIndex(tx, "DeliveryLastKnownDate", SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)  ).createCursor(tx), sourceID); // Actually keyed by delivery, not ID_BB_GLOBAL
+        }
+
+        public LocalDate lastKnownDate(String idBBGlobal) {
+            return maxDate(itemLastKnownDateCursor.moveTo(idBBGlobal) ? itemLastKnownDateCursor.getValue() : null,
+                           lastKnownDeliveryCursor.moveTo(idBBGlobal) && deliveryLastKnownDateCursor.moveTo(lastKnownDeliveryCursor.getValue()) ? deliveryLastKnownDateCursor.getValue() : null);
+        }
+
+        public void killAllProductsInDeliveryExcept(String delivery, LocalDate deliveryPriorLastKnownDate, HashSet<String> seenIdBBGlobals) {
+            if (lastKnownDeliveryCursor.moveFirst()) {
+                do {
+                    final String idBBGlobal = lastKnownDeliveryCursor.getKey();
+                    lastKnownDeliveryCursor.moveTo(idBBGlobal); // TODO: yuck
+                    if (!lastKnownDeliveryCursor.getValue().equals(delivery) || seenIdBBGlobals.contains(idBBGlobal)) continue;
+
+                    final LocalDate itemLKD = itemLastKnownDateCursor.moveTo(idBBGlobal) ? itemLastKnownDateCursor.getValue() : null;
+                    lastKnownDeliveryCursor.delete();
+                    itemLastKnownDateCursor.put(maxDate(deliveryPriorLastKnownDate, itemLKD));
+                } while (lastKnownDeliveryCursor.moveNext());
+            }
+        }
+
+        public void close() {
+            lastKnownDeliveryCursor.cursor.close();
+            itemLastKnownDateCursor.cursor.close();
+            deliveryLastKnownDateCursor.cursor.close();
+        }
+    }
+
     public static class Source {
         public static final Schema<Source> SCHEMA = Schema.zipWith(new Latin1StringSchema(10), Source::getPartition,
                                                                    LocalDateSchema.INSTANCE,   Source::getDate,
@@ -338,126 +375,177 @@ public class BitemporalSparseLoader {
         return a.isAfter(b) ? a : b;
     }
 
-    public static void load(Database db, Transaction tx, LocalDate date, String delivery, ZipInputStream zis) throws IOException {
-        final CSVReader reader = new CSVReader(new InputStreamReader(zis), '|');
+    public static void load(Database db, Transaction tx, LocalDate date, String delivery, InputStream is) throws IOException {
+        final CSVReader reader = new CSVReader(new InputStreamReader(is), '|');
         String[] headers = reader.readNext();
         if (headers == null || headers.length == 1) {
             // Empty file
             return;
         }
 
-        final Cursor<Integer, Source> sourceCursor = db.createIndex(tx, "Source", IntegerSchema.INSTANCE, Source.SCHEMA).createCursor(tx);
-        final int sourceID = sourceCursor.moveLast() ? sourceCursor.getKey() + 1 : 0;
-        sourceCursor.put(sourceID, new Source(delivery, date));
+        try (final Cursor<Integer, Source> sourceCursor = createSourcesCursor(db, tx);
+             final Cursor<String, Void> fieldsCursor = createFieldsCursor(db, tx)) {
+            final int sourceID = sourceCursor.moveLast() ? sourceCursor.getKey() + 1 : 0;
+            sourceCursor.put(sourceID, new Source(delivery, date));
 
-        final SparseSourceTemporalCursor<String>    lastKnownDeliveryCursor     = new SparseSourceTemporalCursor<>(db.createIndex(tx, "LastKnownDelivery",     SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(new Latin1StringSchema(10))).createCursor(tx), sourceID);
-        final SparseSourceTemporalCursor<LocalDate> itemLastKnownDateCursor     = new SparseSourceTemporalCursor<>(db.createIndex(tx, "ItemLastKnownDate",     SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)  ).createCursor(tx), sourceID);
-        final SparseSourceTemporalCursor<LocalDate> deliveryLastKnownDateCursor = new SparseSourceTemporalCursor<>(db.createIndex(tx, "DeliveryLastKnownDate", SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)  ).createCursor(tx), sourceID); // Actually keyed by delivery, not ID_BB_GLOBAL
+            try (final LKDCursors lkdCursors = new LKDCursors(db, tx, sourceID)) {
 
-        // Given:
-        //  * idBBGlobal
-        //  * sourceID
-        // The last known date of the item is the max of:
-        //  * itemLastKnownDateCursor(sourceID, idBBGlobal)
-        //  * deliveryLastKnownDateCursor(sourceID, lastKnownDeliveryCursor(sourceID, idBBGlobal))
-        // The last known date monotonically increases as we add more sources to the chain, and
-        // tells you the final date over which a static field with a missing end date should be valid.
-        //
-        // When we see a new source we update the corresponding deliveryLastKnownDateCursor, which implicitly
-        // pads forward all statics for anything currently in that delivery. When we change the delivery in
-        // which a idBBGlobal appears we update itemLastKnownDateCursor to record the LKD in the old delivery.
-        // This is necessary because the new delivery may have a lower date than the one we are moving from
-        // but we don't want to reduce the LKD for this idBBGlobal.
+                // Given:
+                //  * idBBGlobal
+                //  * sourceID
+                // The last known date of the item is the max of:
+                //  * itemLastKnownDateCursor(sourceID, idBBGlobal)
+                //  * deliveryLastKnownDateCursor(sourceID, lastKnownDeliveryCursor(sourceID, idBBGlobal))
+                // The last known date monotonically increases as we add more sources to the chain, and
+                // tells you the final date over which a static field with a missing end date should be valid.
+                //
+                // When we see a new source we update the corresponding deliveryLastKnownDateCursor, which implicitly
+                // pads forward all statics for anything currently in that delivery. When we change the delivery in
+                // which a idBBGlobal appears we update itemLastKnownDateCursor to record the LKD in the old delivery.
+                // This is necessary because the new delivery may have a lower date than the one we are moving from
+                // but we don't want to reduce the LKD for this idBBGlobal.
 
-        deliveryLastKnownDateCursor.moveTo(delivery);
-        final LocalDate deliveryPriorLastKnownDate = deliveryLastKnownDateCursor.put(date);
+                lkdCursors.deliveryLastKnownDateCursor.moveTo(delivery);
+                final LocalDate deliveryPriorLastKnownDate = lkdCursors.deliveryLastKnownDateCursor.put(date);
 
-        int idBBGlobalIx = -1;
-        final SparseTemporalCursor<String>[] cursors = (SparseTemporalCursor<String>[]) new SparseTemporalCursor[headers.length];
-        for (int i = 0; i < headers.length; i++) {
-            if (headers[i].equals("ID_BB_GLOBAL")) {
-                idBBGlobalIx = i;
-            } else {
-                final String indexName = headers[i].replace(" ", "");
-                final Index<TemporalFieldKey, SparseTemporalFieldValue<String>> index = db.createIndex(tx, indexName, TemporalFieldKey.SCHEMA, SparseTemporalFieldValue.schema(new Latin1StringSchema(64)));
-                cursors[i] = new SparseTemporalCursor<>(index.createCursor(tx), sourceID);
-            }
-        }
-
-        if (idBBGlobalIx < 0) {
-            throw new IllegalArgumentException("No ID_BB_GLOBAL field");
-        }
-
-        int items = 0;
-        long startTime = System.nanoTime();
-
-        final HashSet<String> seenIdBBGlobals = new HashSet<>();
-        String[] line;
-        while ((line = reader.readNext()) != null) {
-            if (line.length < headers.length) {
-                continue;
-            }
-
-            final String idBBGlobal = line[idBBGlobalIx];
-            seenIdBBGlobals.add(idBBGlobal);
-
-            final LocalDate itemLastKnownDate = itemLastKnownDateCursor.moveTo(idBBGlobal) ? itemLastKnownDateCursor.getValue() : null;
-
-            lastKnownDeliveryCursor.moveTo(idBBGlobal);
-            final String oldDelivery = lastKnownDeliveryCursor.put(delivery);
-            final LocalDate oldDeliveryPriorLastKnownDate
-                = delivery.equals(oldDelivery)                                             ? deliveryPriorLastKnownDate
-                : (oldDelivery != null && deliveryLastKnownDateCursor.moveTo(oldDelivery)) ? deliveryLastKnownDateCursor.getValue()
-                : null;
-            final LocalDate priorLastKnownDate = maxDate(oldDeliveryPriorLastKnownDate, itemLastKnownDate);
-            final LocalDate lastKnownDate      = maxDate(priorLastKnownDate, date);
-            if (oldDelivery != null && !delivery.equals(oldDelivery) && priorLastKnownDate != null) {
-                itemLastKnownDateCursor.put(priorLastKnownDate);
-            }
-
-            for (int i = 0; i < headers.length; i++) {
-                if (i == idBBGlobalIx) continue;
-
-                final SparseTemporalCursor<String> cursor = cursors[i];
-                final String value = line[i].trim();
-
-                items++;
-
-                cursor.setPosition(idBBGlobal, priorLastKnownDate, lastKnownDate);
-                if (value.length() != 0) {
-                    cursor.put(date, value);
-                } else {
-                    cursor.delete(date);
-                }
-            }
-        }
-
-        /*
-        if (lastKnownDeliveryCursor.moveFirst()) {
-            do {
-                if (lastKnownDeliveryCursor.getKey().getSourceID() <= sourceID) {
-                    final SparseSourceTemporalFieldValue<String> lastKnownDelivery = lastKnownDeliveryCursor.getValue();
-                    if (lastKnownDelivery.getToSourceID() == null || lastKnownDelivery.getToSourceID() > sourceID) {
-
+                int idBBGlobalIx = -1;
+                final SparseTemporalCursor<String>[] cursors = (SparseTemporalCursor<String>[]) new SparseTemporalCursor[headers.length];
+                for (int i = 0; i < headers.length; i++) {
+                    if (headers[i].equals("ID_BB_GLOBAL")) {
+                        idBBGlobalIx = i;
+                    } else {
+                        final String indexName = headers[i].replace(" ", "");
+                        if (!fieldsCursor.moveTo(indexName)) fieldsCursor.put(indexName, null);
+                        cursors[i] = new SparseTemporalCursor<>(createFieldCursor(db, tx, indexName), sourceID);
                     }
                 }
-            } while (lastKnownDeliveryCursor.moveNext());
+
+                if (idBBGlobalIx < 0) {
+                    throw new IllegalArgumentException("No ID_BB_GLOBAL field");
+                }
+
+                int items = 0;
+                long startTime = System.nanoTime();
+
+                final HashSet<String> seenIdBBGlobals = new HashSet<>();
+                String[] line;
+                while ((line = reader.readNext()) != null) {
+                    if (line.length < headers.length) {
+                        continue;
+                    }
+
+                    final String idBBGlobal = line[idBBGlobalIx];
+                    seenIdBBGlobals.add(idBBGlobal);
+
+                    final LocalDate itemLastKnownDate = lkdCursors.itemLastKnownDateCursor.moveTo(idBBGlobal) ? lkdCursors.itemLastKnownDateCursor.getValue() : null;
+
+                    lkdCursors.lastKnownDeliveryCursor.moveTo(idBBGlobal);
+                    final String oldDelivery = lkdCursors.lastKnownDeliveryCursor.put(delivery);
+                    final LocalDate oldDeliveryPriorLastKnownDate
+                        = delivery.equals(oldDelivery)                                                        ? deliveryPriorLastKnownDate
+                        : (oldDelivery != null && lkdCursors.deliveryLastKnownDateCursor.moveTo(oldDelivery)) ? lkdCursors.deliveryLastKnownDateCursor.getValue()
+                        : null;
+                    final LocalDate priorLastKnownDate = maxDate(oldDeliveryPriorLastKnownDate, itemLastKnownDate);
+                    final LocalDate lastKnownDate      = maxDate(priorLastKnownDate, date);
+                    if (oldDelivery != null && !delivery.equals(oldDelivery) && priorLastKnownDate != null) {
+                        lkdCursors.itemLastKnownDateCursor.put(priorLastKnownDate);
+                    }
+
+                    for (int i = 0; i < headers.length; i++) {
+                        if (i == idBBGlobalIx) continue;
+
+                        final SparseTemporalCursor<String> cursor = cursors[i];
+                        final String value = line[i].trim();
+
+                        items++;
+
+                        cursor.setPosition(idBBGlobal, priorLastKnownDate, lastKnownDate);
+                        if (value.length() != 0) {
+                            cursor.put(date, value);
+                        } else {
+                            cursor.delete(date);
+                        }
+                    }
+                }
+
+                /*
+                if (lastKnownDeliveryCursor.moveFirst()) {
+                    do {
+                        if (lastKnownDeliveryCursor.getKey().getSourceID() <= sourceID) {
+                            final SparseSourceTemporalFieldValue<String> lastKnownDelivery = lastKnownDeliveryCursor.getValue();
+                            if (lastKnownDelivery.getToSourceID() == null || lastKnownDelivery.getToSourceID() > sourceID) {
+
+                            }
+                        }
+                    } while (lastKnownDeliveryCursor.moveNext());
+                }
+                */
+
+                // Kill off any product that we expected to be in this delivery but was not
+                lkdCursors.killAllProductsInDeliveryExcept(delivery, deliveryPriorLastKnownDate, seenIdBBGlobals);
+
+                long duration = System.nanoTime() - startTime;
+                System.out.println("Loaded " + items + " in " + duration + "ns (" + (duration / items) + "ns/item)");
+            }
         }
-        */
+    }
 
-        // Kill off any product that we expected to be in this delivery but was not
-        if (lastKnownDeliveryCursor.moveFirst()) {
-            do {
-                final String idBBGlobal = lastKnownDeliveryCursor.getKey();
-                if (seenIdBBGlobals.contains(idBBGlobal)) continue;
+    private static Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> createFieldCursor(Database db, Transaction tx, String indexName) {
+        return db.createIndex(tx, indexName, TemporalFieldKey.SCHEMA, SparseTemporalFieldValue.schema(new Latin1StringSchema(64))).createCursor(tx);
+    }
 
-                lastKnownDeliveryCursor.put(null);
-                itemLastKnownDateCursor.moveTo(idBBGlobal);
-                itemLastKnownDateCursor.put(deliveryPriorLastKnownDate);
-            } while (lastKnownDeliveryCursor.moveNext());
+    private static Cursor<String, Void> createFieldsCursor(Database db, Transaction tx) {
+        return db.createIndex(tx, "Fields", Latin1StringSchema.INSTANCE, VoidSchema.INSTANCE).createCursor(tx);
+    }
+
+    private static Cursor<Integer, Source> createSourcesCursor(Database db, Transaction tx) {
+        return db.createIndex(tx, "Source", IntegerSchema.INSTANCE, Source.SCHEMA).createCursor(tx);
+    }
+
+    public static Map<String, Map<String, SortedMap<LocalDate, String>>> currentSourceToJava(Database db, Transaction tx) {
+        final HashMap<String, Map<String, SortedMap<LocalDate, String>>> valuesByField = new HashMap<>();
+
+        try (final Cursor<Integer, Source> sourcesCursor = createSourcesCursor(db, tx);
+             final Cursor<String, Void> fieldsCursor = createFieldsCursor(db, tx)) {
+            int currentSourceId = sourcesCursor.moveLast() ? sourcesCursor.getKey() : -1;
+            try (final LKDCursors lkdCursors = new LKDCursors(db, tx, currentSourceId)) {
+                if (fieldsCursor.moveFirst()) {
+                    do {
+                        final String field = fieldsCursor.getKey();
+                        final Map<String, SortedMap<LocalDate, String>> valuesByIDBBGlobal = new HashMap<>();
+                        valuesByField.put(field, valuesByIDBBGlobal);
+
+                        try (final Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> fieldCursor = createFieldCursor(db, tx, field)) {
+                            final FilteredView<TemporalFieldKey, SparseTemporalFieldValue<String>> nowFieldCursor = new FilteredView<>(fieldCursor, (TemporalFieldKey k, SparseTemporalFieldValue<String> v) -> v.toSourceID == null);
+                            if (nowFieldCursor.moveFirst()) {
+                                do {
+                                    // FIXME: exploit the fact that we are grouped by id bb unique to reduce LKD lookups
+                                    // (could even merge join with the underlying per-item LKD tables)
+                                    final String idBBGlobal = nowFieldCursor.getKey().getIDBBGlobal();
+                                    SortedMap<LocalDate, String> valuesByDate = valuesByIDBBGlobal.get(idBBGlobal);
+                                    if (valuesByDate == null) {
+                                        valuesByDate = new TreeMap<>();
+                                        valuesByIDBBGlobal.put(idBBGlobal, valuesByDate);
+                                    }
+
+                                    final LocalDate lkd = lkdCursors.lastKnownDate(idBBGlobal);
+                                    final String value = nowFieldCursor.getValue().getValue();
+                                    LocalDate date = nowFieldCursor.getKey().getDate();
+                                    // FIXME: suspect -- should use to date based on from/to source id?
+                                    while (date.isBefore(nowFieldCursor.getValue().getToDate() == null ? lkd.plusDays(1) : nowFieldCursor.getValue().getToDate())) {
+                                        if (valuesByDate.put(date, value) != null) {
+                                            throw new IllegalStateException("Integrity check failure: date " + date + " was covered twice in the DB");
+                                        }
+                                        date = date.plusDays(1);
+                                    }
+                                } while (nowFieldCursor.moveNext());
+                            }
+                        }
+                    } while (fieldsCursor.moveNext());
+                }
+
+                return valuesByField;
+            }
         }
-
-        long duration = System.nanoTime() - startTime;
-        System.out.println("Loaded " + items + " in " + duration + "ns (" + (duration / items) + "ns/item)");
     }
 }
