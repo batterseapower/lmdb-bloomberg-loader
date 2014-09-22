@@ -56,11 +56,11 @@ public class BitemporalSparseLoaderTest {
     @Test
     public void randomTest() throws IOException {
         final Random random = new Random();
-        final long seed = 1050929968585294895l; // FIXME: random.nextLong();
+        final long seed = random.nextLong();
         random.setSeed(seed);
         System.out.println(seed);
 
-        for (int i = 0; i < 1000; i++) {
+        for (int i = 0; i < 10; i++) {
             try (Database db = createDatabase();
                  Transaction tx = db.transaction(false)) {
 
@@ -68,7 +68,8 @@ public class BitemporalSparseLoaderTest {
                 final Map<String, SortedMap<LocalDate, String>> expectedName  = new HashMap<>(); expected.put("NAME",  expectedName);
                 final Map<String, SortedMap<LocalDate, String>> expectedPrice = new HashMap<>(); expected.put("PRICE", expectedPrice);
                 final Map<String, Pair<String, LocalDate>> lastSeenByID = new HashMap<>();
-                for (LocalDate date : new LocalDate[] { LocalDate.of(2014, 1, 1), LocalDate.of(2014, 1, 2), LocalDate.of(2014, 1, 3), LocalDate.of(2014, 1, 4) }) {
+                for (int j = 0; j < 6; j++) {
+                    final LocalDate date = LocalDate.of(2014, 1, 1).plusDays(j);
                     for (String delivery : random.nextBoolean() ? new String[] { "foo" } : new String[] { "foo", "bar" }) {
                         final StringBuilder csv = new StringBuilder();
                         csv.append("ID_BB_GLOBAL|NAME|PRICE\n");

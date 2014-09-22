@@ -173,6 +173,11 @@ public class BitemporalSparseLoader {
         private final V value;
 
         public SparseTemporalFieldValue(LocalDate toDate, Integer toSourceID, V value) {
+            if (toSourceID != null && toDate == null) {
+                throw new IllegalArgumentException("In order to make interpreting rows in the database simpler and faster " +
+                                                   "we maintain the invariant that toDate is only null if toSourceID is null.");
+            }
+
             this.toDate = toDate;
             this.toSourceID = toSourceID;
             this.value = value;
@@ -182,18 +187,18 @@ public class BitemporalSparseLoader {
         public Integer getToSourceID() { return toSourceID; } // Invariant: must not be greater than the maximum source ID
         public V getValue() { return value; }
 
-        public SparseTemporalFieldValue<V> setToDate(LocalDate toDate) { return new SparseTemporalFieldValue<>(toDate, toSourceID, value); }
-
         // NB: assumes that LKD is a monotonically increasing function of sourceID
         //
         // NB: this is an estimate in that it may return a maximum that is higher than the true value: it is guaranteed
         // to never return one lower than the true value. (This can happen when toSourceID < the maximum source ID, in
         // which case our maxAchievableLKD may be higher than what is achievable in reality since we only work with the
         // penultimateSourceLKD here rather than the full mapping from source ID to LKD.)
-        public LocalDate estimateMaximumToDate(LocalDate penultimateSourceLKD, LocalDate maxSourceLKD) {
-            if (maxSourceLKD == null) throw new IllegalArgumentException("maxSourceLKD argument must not be null, though penultimateSourceLKD may be");
+        //
+        // FIXME: revise the guarantees this function provides in light of the new ToSourceID/ToDate invariant
+        public LocalDate estimateMaximumToDate(LocalDate penultimateSourceLKD, LocalDate ultimateSourceLKD) {
+            if (ultimateSourceLKD == null) throw new IllegalArgumentException("ultimateSourceLKD argument must not be null, though penultimateSourceLKD may be");
 
-            final LocalDate maxAchievableLKD = (toSourceID == null || penultimateSourceLKD == null) ? maxSourceLKD : penultimateSourceLKD;
+            final LocalDate maxAchievableLKD = (toSourceID == null || penultimateSourceLKD == null) ? ultimateSourceLKD : penultimateSourceLKD;
             return (toDate == null || maxAchievableLKD.isBefore(toDate)) ? maxAchievableLKD : toDate;
         }
     }
@@ -229,8 +234,7 @@ public class BitemporalSparseLoader {
                 return false;
             } else {
                 final LocalDate toDate = this.subcursorForCurrentSourceID.getValue().getToDate();
-                // FIXME: toDate == null case suspect -- should use the LKD from the associated source range, not just a generic LKD!
-                return (toDate == null ? priorLastKnownDate.plusDays(1) : toDate).isAfter(date);
+                return (toDate == null ? lastKnownDate.plusDays(1) : toDate).isAfter(date);
             }
         }
 
@@ -255,12 +259,10 @@ public class BitemporalSparseLoader {
                     }
 
                     existingFieldValue = cursor.getValue();
-                    // FIXME: toDate == null case suspect -- should use the LKD from the associated source range, not just a generic LKD!
-                    if ((existingFieldValue.getToDate() == null ? priorLastKnownDate.plusDays(1) : existingFieldValue.getToDate()).isAfter(date)) {
-                        if (existingFieldValue.getToSourceID() == null) {
-                            found = true;
-                            break;
-                        }
+                    if (existingFieldValue.getToSourceID() == null &&
+                        (existingFieldValue.getToDate() == null ? lastKnownDate.plusDays(1) : existingFieldValue.getToDate()).isAfter(date)) {
+                        found = true;
+                        break;
                     }
                 } while (subcursor.moveNext());
 
@@ -280,9 +282,8 @@ public class BitemporalSparseLoader {
                     //  4. (S,   null, D, D+1) -> v'
                     // Where:
                     //  a) Any tuple may be omitted if FromDate >= min(ToDate, max(LKBD( [FromSource, ISNULL(ToSource, S)) ))
-                    //  b) The D+1 ToDate for tuple 3 may be set to null if D+1 is > max(LKBD( [FromSource, S) ))
-                    //  c) Tuple 3 may be omitted if S_f >= S
-                    //  d) The D+1 ToDate for tuple 4 may be set to null if D+1 is > the LKBD for S
+                    //  b) Tuple 3 may be omitted if S_f >= S
+                    //  c) The D+1 ToDate for tuple 4 may be set to null if D+1 is > the LKBD for S
                     {
                         // Tuple 1
                         final SparseTemporalFieldValue<V> proposedValue = new SparseTemporalFieldValue<>(date, null, existingFieldValue.getValue());
@@ -299,9 +300,9 @@ public class BitemporalSparseLoader {
                     }
                     // Tuple 3
                     if (existingFieldKey.v < currentSourceID) {
-                        final LocalDate proposedToDate = date.isBefore(priorLastKnownDate) ? date.plusDays(1) : null;
+                        final LocalDate proposedToDate = minDate(priorLastKnownDate, date).plusDays(1);
                         subcursor.put(new Pair<>(date, existingFieldKey.v),
-                                      new SparseTemporalFieldValue<V>(proposedToDate, currentSourceID, existingFieldValue.getValue()));
+                                      new SparseTemporalFieldValue<>(proposedToDate, currentSourceID, existingFieldValue.getValue()));
                     }
                 }
             }
@@ -310,7 +311,7 @@ public class BitemporalSparseLoader {
             if (value.isPresent()) {
                 final LocalDate proposedToDate = date.isBefore(lastKnownDate) ? date.plusDays(1) : null;
                 subcursor.put(new Pair<>(date, currentSourceID),
-                              new SparseTemporalFieldValue<V>(proposedToDate, null, value.get()));
+                              new SparseTemporalFieldValue<>(proposedToDate, null, value.get()));
             }
         }
     }
@@ -373,6 +374,12 @@ public class BitemporalSparseLoader {
         if (a == null) return b;
         if (b == null) return a;
         return a.isAfter(b) ? a : b;
+    }
+
+    private static LocalDate minDate(LocalDate a, LocalDate b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return a.isAfter(b) ? b : a;
     }
 
     public static void load(Database db, Transaction tx, LocalDate date, String delivery, InputStream is) throws IOException {
@@ -449,6 +456,31 @@ public class BitemporalSparseLoader {
                     final LocalDate lastKnownDate      = maxDate(priorLastKnownDate, date);
                     if (oldDelivery != null && !delivery.equals(oldDelivery) && priorLastKnownDate != null) {
                         lkdCursors.itemLastKnownDateCursor.put(priorLastKnownDate);
+                    } else if (oldDelivery == null && itemLastKnownDate != null) {
+                        // We have just resurrected a dead item. This leads to a problem. For any field for this quote
+                        // we may already have a (FromSourceID, ToSourceID=NULL, FromDate, ToDate=NULL) tuple in the DB.
+                        // By the act of bumping the quote into this delivery we have changed the implicit ToSourceID
+                        // on all of these rows, but we (probably) don't really want to pad all those old values -- because
+                        // the quote was deleted for that time period we should just record missing values for those dates.
+                        //
+                        // To avoid this we go back and rewrite these tuples to (FromSourceID, ToSourceID=NULL, FromDate, ToDate=priorLastKnownDate+1)
+                        if (fieldsCursor.moveFirst()) {
+                            do {
+                                final String field = fieldsCursor.getKey();
+                                try (final Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> fieldCursor = createFieldCursor(db, tx, field)) {
+                                    final SubcursorView<String, Pair<LocalDate, Integer>, SparseTemporalFieldValue<String>> cursor =  new SubcursorView<>(fieldCursor, ID_BB_GLOBAL_SCHEMA, Schema.zip(LocalDateSchema.INSTANCE, SOURCE_ID_SCHEMA));
+                                    cursor.setPosition(idBBGlobal);
+                                    if (cursor.moveFirst()) {
+                                        do {
+                                            final SparseTemporalFieldValue<String> fieldValue = cursor.getValue();
+                                            if (fieldValue.getToSourceID() == null && fieldValue.getToDate() == null) {
+                                                cursor.put(new SparseTemporalFieldValue<>(priorLastKnownDate.plusDays(1), null, fieldValue.getValue()));
+                                            }
+                                        } while (cursor.moveNext());
+                                    }
+                                }
+                            } while (fieldsCursor.moveNext());
+                        }
                     }
 
                     for (int i = 0; i < headers.length; i++) {
@@ -521,7 +553,8 @@ public class BitemporalSparseLoader {
                                 do {
                                     // FIXME: exploit the fact that we are grouped by id bb unique to reduce LKD lookups
                                     // (could even merge join with the underlying per-item LKD tables)
-                                    final String idBBGlobal = nowFieldCursor.getKey().getIDBBGlobal();
+                                    final TemporalFieldKey fieldKey = nowFieldCursor.getKey();
+                                    final String idBBGlobal = fieldKey.getIDBBGlobal();
                                     SortedMap<LocalDate, String> valuesByDate = valuesByIDBBGlobal.get(idBBGlobal);
                                     if (valuesByDate == null) {
                                         valuesByDate = new TreeMap<>();
@@ -529,12 +562,17 @@ public class BitemporalSparseLoader {
                                     }
 
                                     final LocalDate lkd = lkdCursors.lastKnownDate(idBBGlobal);
-                                    final String value = nowFieldCursor.getValue().getValue();
-                                    LocalDate date = nowFieldCursor.getKey().getDate();
-                                    // FIXME: suspect -- should use to date based on from/to source id?
-                                    while (date.isBefore(nowFieldCursor.getValue().getToDate() == null ? lkd.plusDays(1) : nowFieldCursor.getValue().getToDate())) {
-                                        if (valuesByDate.put(date, value) != null) {
-                                            throw new IllegalStateException("Integrity check failure: date " + date + " was covered twice in the DB");
+                                    final SparseTemporalFieldValue<String> fieldValue = nowFieldCursor.getValue();
+                                    final LocalDate padToDate = fieldValue.getToDate() == null ? lkd.plusDays(1) : fieldValue.getToDate();
+
+                                    LocalDate date = fieldKey.getDate();
+                                    if (!date.isBefore(padToDate)) {
+                                        throw new IllegalStateException("Integrity check failure: row covered non-positive length region [" + fieldKey.getDate() + "-" + padToDate + ") for " + field + " and " + idBBGlobal);
+                                    }
+
+                                    while (date.isBefore(padToDate)) {
+                                        if (valuesByDate.put(date, fieldValue.getValue()) != null) {
+                                            throw new IllegalStateException("Integrity check failure: date " + date + " was covered twice in the DB for " + field + " and " + idBBGlobal);
                                         }
                                         date = date.plusDays(1);
                                     }
