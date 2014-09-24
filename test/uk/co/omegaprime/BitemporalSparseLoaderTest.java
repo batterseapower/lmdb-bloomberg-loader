@@ -60,6 +60,7 @@ public class BitemporalSparseLoaderTest {
         random.setSeed(seed);
         System.out.println(seed);
 
+        final Map<Integer, Map<String, Map<String, SortedMap<LocalDate, String>>>> actualBySourceID = new HashMap<>();
         for (int i = 0; i < 10; i++) {
             try (Database db = createDatabase();
                  Transaction tx = db.transaction(false)) {
@@ -117,11 +118,17 @@ public class BitemporalSparseLoaderTest {
 
                         System.out.println(delivery + ": " + date);
                         System.out.println(csv.toString());
-                        BitemporalSparseLoader.load(db, tx, date, delivery, new ByteArrayInputStream(csv.toString().getBytes()));
+                        final int sourceID = BitemporalSparseLoader.load(db, tx, date, delivery, new ByteArrayInputStream(csv.toString().getBytes()));
+                        actualBySourceID.put(sourceID, BitemporalSparseLoader.currentSourceToJava(db, tx));
                     }
 
                     final Map<String, Map<String, SortedMap<LocalDate, String>>> actual = BitemporalSparseLoader.currentSourceToJava(db, tx);
                     assertEquals(expected, actual);
+                }
+
+                // Test the bitemporal aspect of the DB: ensure that we can reconstruct previously seen sources
+                for (int sourceID : actualBySourceID.keySet()) {
+                    assertEquals(Integer.toString(sourceID), actualBySourceID.get(sourceID), BitemporalSparseLoader.sourceToJava(db, tx, sourceID));
                 }
             }
         }
