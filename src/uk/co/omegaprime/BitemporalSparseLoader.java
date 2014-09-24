@@ -284,6 +284,10 @@ public class BitemporalSparseLoader {
                     //  a) Any tuple may be omitted if FromDate >= min(ToDate, max(LKBD( [FromSource, ISNULL(ToSource, S)) ))
                     //  b) Tuple 3 may be omitted if S_f >= S
                     //  c) The D+1 ToDate for tuple 4 may be set to null if D+1 is > the LKBD for S
+                    //
+                    // NB: tuples 2 and 3 might create tuples that are useful for only part of their source range. For example
+                    // if the last known date as of S_f is less than D then both tuple 2 and 3 will start after the last known date
+                    // and so encode absolutely no information for S_f (and possibly some successor sources as well). But that's fine!
                     {
                         // Tuple 1
                         final SparseTemporalFieldValue<V> proposedValue = new SparseTemporalFieldValue<>(date, null, existingFieldValue.getValue());
@@ -574,10 +578,6 @@ public class BitemporalSparseLoader {
                                     final LocalDate padToDate = minDate(fieldValue.getToDate(), lkd.plusDays(1));
 
                                     LocalDate date = fieldKey.getDate();
-                                    if (!date.isBefore(padToDate)) {
-                                        throw new IllegalStateException("Integrity check failure: row covered non-positive length region [" + fieldKey.getDate() + "-" + padToDate + ") for " + field + " and " + idBBGlobal);
-                                    }
-
                                     while (date.isBefore(padToDate)) {
                                         if (valuesByDate.put(date, fieldValue.getValue()) != null) {
                                             throw new IllegalStateException("Integrity check failure: date " + date + " was covered twice in the DB for " + field + " and " + idBBGlobal);

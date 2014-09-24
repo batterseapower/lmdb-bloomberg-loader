@@ -37,7 +37,7 @@ public class BitemporalSparseLoaderTest {
         dbDirectory.mkdir();
         dbDirectory.deleteOnExit();
 
-        return () -> new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1_073_741_824));
+        return () -> new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1024 * 1024));
     }
 
     private static Database createDatabase() {
@@ -60,10 +60,11 @@ public class BitemporalSparseLoaderTest {
         random.setSeed(seed);
         System.out.println(seed);
 
-        final Map<Integer, Map<String, Map<String, SortedMap<LocalDate, String>>>> actualBySourceID = new HashMap<>();
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 100; i++) {
             try (Database db = createDatabase();
                  Transaction tx = db.transaction(false)) {
+
+                final Map<Integer, Map<String, Map<String, SortedMap<LocalDate, String>>>> actualBySourceID = new HashMap<>();
 
                 final Map<String, Map<String, SortedMap<LocalDate, String>>> expected = new HashMap<>();
                 final Map<String, SortedMap<LocalDate, String>> expectedName  = new HashMap<>(); expected.put("NAME",  expectedName);
