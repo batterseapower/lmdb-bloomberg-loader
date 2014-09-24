@@ -189,12 +189,12 @@ public class BitemporalSparseLoader {
 
         // NB: assumes that LKD is a monotonically increasing function of sourceID
         //
-        // NB: this is an estimate in that it may return a maximum that is higher than the true value: it is guaranteed
-        // to never return one lower than the true value. (This can happen when toSourceID < the maximum source ID, in
-        // which case our maxAchievableLKD may be higher than what is achievable in reality since we only work with the
-        // penultimateSourceLKD here rather than the full mapping from source ID to LKD.)
+        // This is an estimate in that it may return a maximum that is higher than the true value: it is guaranteed
+        // to never return one lower than the true value. This can *only* happen when toSourceID < the maximum source ID,
+        // in which case our maxAchievableLKD may be higher than what is achievable in reality since we only work with the
+        // penultimateSourceLKD here rather than the full mapping from source ID to LKD.
         //
-        // FIXME: revise the guarantees this function provides in light of the new ToSourceID/ToDate invariant
+        // In the case that toSourceID is null this returns a precise answer.
         public LocalDate estimateMaximumToDate(LocalDate penultimateSourceLKD, LocalDate ultimateSourceLKD) {
             if (ultimateSourceLKD == null) throw new IllegalArgumentException("ultimateSourceLKD argument must not be null, though penultimateSourceLKD may be");
 
@@ -289,7 +289,7 @@ public class BitemporalSparseLoader {
                     // if the last known date as of S_f is less than D then both tuple 2 and 3 will start after the last known date
                     // and so encode absolutely no information for S_f (and possibly some successor sources as well). But that's fine!
                     {
-                        // Tuple 1
+                        // Tuple 1. NB: proposedValue.toSourceID is null so estimateMaximumToDate returns an exact value
                         final SparseTemporalFieldValue<V> proposedValue = new SparseTemporalFieldValue<>(date, null, existingFieldValue.getValue());
                         if (existingFieldKey.k.isBefore(proposedValue.estimateMaximumToDate(priorLastKnownDate, lastKnownDate))) {
                             subcursor.put(proposedValue);
@@ -297,7 +297,7 @@ public class BitemporalSparseLoader {
                             subcursor.delete();
                         }
                     }
-                    // Tuple 2
+                    // Tuple 2. NB: existingFieldValue.toSourceID is null so estimateMaximumToDate returns an exact value
                     if (date.plusDays(1).isBefore(existingFieldValue.estimateMaximumToDate(priorLastKnownDate, lastKnownDate))) {
                         subcursor.put(new Pair<>(date.plusDays(1), existingFieldKey.v),
                                       existingFieldValue);
