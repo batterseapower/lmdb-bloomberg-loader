@@ -299,10 +299,12 @@ public class BitemporalSparseLoader {
                                       existingFieldValue);
                     }
                     // Tuple 3
-                    if (existingFieldKey.v < currentSourceID) {
+                    {
                         final LocalDate proposedToDate = minDate(priorLastKnownDate, date).plusDays(1);
-                        subcursor.put(new Pair<>(date, existingFieldKey.v),
-                                      new SparseTemporalFieldValue<>(proposedToDate, currentSourceID, existingFieldValue.getValue()));
+                        if (existingFieldKey.v < currentSourceID && date.isBefore(proposedToDate)) {
+                            subcursor.put(new Pair<>(date, existingFieldKey.v),
+                                          new SparseTemporalFieldValue<>(proposedToDate, currentSourceID, existingFieldValue.getValue()));
+                        }
                     }
                 }
             }
@@ -382,12 +384,11 @@ public class BitemporalSparseLoader {
         return a.isAfter(b) ? b : a;
     }
 
-    public static void load(Database db, Transaction tx, LocalDate date, String delivery, InputStream is) throws IOException {
+    public static int load(Database db, Transaction tx, LocalDate date, String delivery, InputStream is) throws IOException {
         final CSVReader reader = new CSVReader(new InputStreamReader(is), '|');
         String[] headers = reader.readNext();
         if (headers == null || headers.length == 1) {
-            // Empty file
-            return;
+            throw new IllegalStateException("Empty file");
         }
 
         try (final Cursor<Integer, Source> sourceCursor = createSourcesCursor(db, tx);
@@ -517,8 +518,10 @@ public class BitemporalSparseLoader {
                 lkdCursors.killAllProductsInDeliveryExcept(delivery, deliveryPriorLastKnownDate, seenIdBBGlobals);
 
                 long duration = System.nanoTime() - startTime;
-                System.out.println("Loaded " + items + " in " + duration + "ns (" + (duration / items) + "ns/item)");
+                System.out.println("Loaded " + items + " in " + duration + "ns (" + (duration / items) + "ns/item) to source ID " + sourceID);
             }
+
+            return sourceID;
         }
     }
 
@@ -535,11 +538,16 @@ public class BitemporalSparseLoader {
     }
 
     public static Map<String, Map<String, SortedMap<LocalDate, String>>> currentSourceToJava(Database db, Transaction tx) {
+        return sourceToJava(db, tx, null);
+    }
+
+    public static Map<String, Map<String, SortedMap<LocalDate, String>>> sourceToJava(Database db, Transaction tx, Integer sourceID) {
         final HashMap<String, Map<String, SortedMap<LocalDate, String>>> valuesByField = new HashMap<>();
 
         try (final Cursor<Integer, Source> sourcesCursor = createSourcesCursor(db, tx);
              final Cursor<String, Void> fieldsCursor = createFieldsCursor(db, tx)) {
-            int currentSourceId = sourcesCursor.moveLast() ? sourcesCursor.getKey() : -1;
+            final int maxSourceId = sourcesCursor.moveLast() ? sourcesCursor.getKey() : -1;
+            int currentSourceId = sourceID == null ? maxSourceId : sourceID;
             try (final LKDCursors lkdCursors = new LKDCursors(db, tx, currentSourceId)) {
                 if (fieldsCursor.moveFirst()) {
                     do {
@@ -548,7 +556,7 @@ public class BitemporalSparseLoader {
                         valuesByField.put(field, valuesByIDBBGlobal);
 
                         try (final Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> fieldCursor = createFieldCursor(db, tx, field)) {
-                            final FilteredView<TemporalFieldKey, SparseTemporalFieldValue<String>> nowFieldCursor = new FilteredView<>(fieldCursor, (TemporalFieldKey k, SparseTemporalFieldValue<String> v) -> v.toSourceID == null);
+                            final FilteredView<TemporalFieldKey, SparseTemporalFieldValue<String>> nowFieldCursor = new FilteredView<>(fieldCursor, (TemporalFieldKey k, SparseTemporalFieldValue<String> v) -> k.getSourceID() <= currentSourceId && (v.getToSourceID() == null ? maxSourceId + 1 : v.getToSourceID()) > currentSourceId);
                             if (nowFieldCursor.moveFirst()) {
                                 do {
                                     // FIXME: exploit the fact that we are grouped by id bb unique to reduce LKD lookups
@@ -563,7 +571,7 @@ public class BitemporalSparseLoader {
 
                                     final LocalDate lkd = lkdCursors.lastKnownDate(idBBGlobal);
                                     final SparseTemporalFieldValue<String> fieldValue = nowFieldCursor.getValue();
-                                    final LocalDate padToDate = fieldValue.getToDate() == null ? lkd.plusDays(1) : fieldValue.getToDate();
+                                    final LocalDate padToDate = minDate(fieldValue.getToDate(), lkd.plusDays(1));
 
                                     LocalDate date = fieldKey.getDate();
                                     if (!date.isBefore(padToDate)) {
