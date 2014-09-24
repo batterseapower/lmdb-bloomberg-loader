@@ -505,19 +505,6 @@ public class BitemporalSparseLoader {
                     }
                 }
 
-                /*
-                if (lastKnownDeliveryCursor.moveFirst()) {
-                    do {
-                        if (lastKnownDeliveryCursor.getKey().getSourceID() <= sourceID) {
-                            final SparseSourceTemporalFieldValue<String> lastKnownDelivery = lastKnownDeliveryCursor.getValue();
-                            if (lastKnownDelivery.getToSourceID() == null || lastKnownDelivery.getToSourceID() > sourceID) {
-
-                            }
-                        }
-                    } while (lastKnownDeliveryCursor.moveNext());
-                }
-                */
-
                 // Kill off any product that we expected to be in this delivery but was not
                 lkdCursors.killAllProductsInDeliveryExcept(delivery, deliveryPriorLastKnownDate, seenIdBBGlobals);
 
