@@ -89,6 +89,7 @@ public class BitemporalSparseLoader {
             return subcursor.getValue().getValue();
         }
 
+        // NB: this only works properly if the current source ID is the maximum one
         public boolean delete() {
             if (positioned) {
                 truncateExistingSubcursorRange(getValue());
@@ -99,6 +100,7 @@ public class BitemporalSparseLoader {
             }
         }
 
+        // NB: this only works properly if the current source ID is the maximum one
         public V put(V value) {
             final V existingValue;
             if (positioned) {
@@ -246,15 +248,16 @@ public class BitemporalSparseLoader {
             }
         }
 
+        // NB: this only works if currentSourceID is the maximum one
         public void put(LocalDate date, V value) {
             putDelete(date, Maybe.of(value));
         }
 
+        // NB: this only works if currentSourceID is the maximum one
         public void delete(LocalDate date) {
             putDelete(date, Maybe.empty());
         }
 
-        // TODO: currently this assumes that the currentSourceID is the maximum one. Should document that this is the only supported mode. (get maybe could support more though?)
         private void putDelete(LocalDate date, Maybe<V> value) {
             if (subcursor.moveFloor(new Pair<>(date, currentSourceID))) {
                 boolean found = false;
