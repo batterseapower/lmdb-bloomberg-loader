@@ -91,7 +91,7 @@ public class BitemporalSparseLoader {
 
         public boolean delete() {
             if (positioned) {
-                subcursor.put(new SparseSourceTemporalFieldValue<V>(currentSourceID, getValue()));
+                truncateExistingSubcursorRange(getValue());
                 positioned = false;
                 return true;
             } else {
@@ -106,13 +106,21 @@ public class BitemporalSparseLoader {
                 if (Objects.equals(existingValue, value)) {
                     return value;
                 }
-                subcursor.put(new SparseSourceTemporalFieldValue<V>(currentSourceID, existingValue));
+                truncateExistingSubcursorRange(existingValue);
             } else {
                 existingValue = null;
             }
 
             subcursor.put(currentSourceID, new SparseSourceTemporalFieldValue<>(null, value));
             return existingValue;
+        }
+
+        private void truncateExistingSubcursorRange(V existingValue) {
+            if (subcursor.getKey() == currentSourceID) {
+                subcursor.delete();
+            } else {
+                subcursor.put(new SparseSourceTemporalFieldValue<V>(currentSourceID, existingValue));
+            }
         }
 
         private boolean isAlive() {
