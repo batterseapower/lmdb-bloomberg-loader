@@ -74,37 +74,42 @@ public class BitemporalSparseLoaderTest {
                     for (String delivery : random.nextBoolean() ? new String[] { "foo" } : new String[] { "foo", "bar" }) {
                         final StringBuilder csv = new StringBuilder();
                         csv.append("ID_BB_GLOBAL|NAME|PRICE\n");
-                        for (String id : random.nextBoolean() ? new String[] { "TERRY" } : new String[] { "TERRY", "MIKE" }) {
-                            final String name = id + random.nextBoolean();
-                            final String price = random.nextBoolean() ? null : Integer.toString(10 * random.nextInt(4));
-                            csv.append(id).append('|')
-                               .append(name).append('|')
-                               .append(price == null ? "" : price).append('\n');
+                        for (String id : new String[] { "TERRY", "MIKE" }) {
+                            final boolean inThisDelivery = id.equals("TERRY") || random.nextBoolean();
 
                             final Pair<String, LocalDate> lastSeen = lastSeenByID.get(id);
-                            if (lastSeen != null) {
+                            if (lastSeen != null && (inThisDelivery || (!sourcesAreExhaustive && lastSeen.k.equals(delivery)))) {
                                 final LocalDate padDate = lastSeen.v;
                                 final String padName  = expectedName .getOrDefault(id, new TreeMap<>()).get(padDate);
                                 final String padPrice = expectedPrice.getOrDefault(id, new TreeMap<>()).get(padDate);
                                 {
                                     LocalDate paddingDate = padDate.plusDays(1);
-                                    while (paddingDate.isBefore(date)) {
+                                    while (!paddingDate.isAfter(date)) {
                                         if (padName  != null) getOrElseUpdate(expectedName,  id, TreeMap::new).put(paddingDate, padName);
                                         if (padPrice != null) getOrElseUpdate(expectedPrice, id, TreeMap::new).put(paddingDate, padPrice);
-                                        paddingDate= paddingDate.plusDays(1);
+                                        paddingDate = paddingDate.plusDays(1);
                                     }
                                 }
                             }
-                            lastSeenByID.put(id, new Pair<>(delivery, date));
 
-                            getOrElseUpdate(expectedName, id, TreeMap::new).put(date, name);
-                            final SortedMap<LocalDate, String> expectedPriceForId = getOrElseUpdate(expectedPrice, id, TreeMap::new);
-                            if (price != null) {
-                                expectedPriceForId.put(date, price);
-                            } else {
-                                expectedPriceForId.remove(date);
-                                if (expectedPriceForId.isEmpty()) {
-                                    expectedPrice.remove(id);
+                            if (inThisDelivery) {
+                                lastSeenByID.put(id, new Pair<>(delivery, date));
+
+                                final String name = id + random.nextBoolean();
+                                final String price = random.nextBoolean() ? null : Integer.toString(10 * random.nextInt(4));
+                                csv.append(id).append('|')
+                                        .append(name).append('|')
+                                        .append(price == null ? "" : price).append('\n');
+
+                                getOrElseUpdate(expectedName, id, TreeMap::new).put(date, name);
+                                final SortedMap<LocalDate, String> expectedPriceForId = getOrElseUpdate(expectedPrice, id, TreeMap::new);
+                                if (price != null) {
+                                    expectedPriceForId.put(date, price);
+                                } else {
+                                    expectedPriceForId.remove(date);
+                                    if (expectedPriceForId.isEmpty()) {
+                                        expectedPrice.remove(id);
+                                    }
                                 }
                             }
                         }
