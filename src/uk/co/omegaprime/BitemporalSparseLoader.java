@@ -184,6 +184,22 @@ public class BitemporalSparseLoader {
 
         public SparseTemporalFieldValue(LocalDate toDate, Integer toSourceID, V value) {
             if (toSourceID != null && toDate == null) {
+                // In fact, the invariant is more complex than this:
+                //  1. If toSourceID == null, then we expect that toDate == null || !toDate.isAfter(lastKnownDate(maxSourceID))
+                //  2. If toSourceID != null, then we expect that toDate != null && !toDate.isAfter(lastKnownDate(toSourceID-1).plusDays(1))
+                //
+                // Condition 1 is necessary for two reasons:
+                //  a) It makes semantic sense: we don't know anything about the future past lastKnownDate, so it doesn't make sense
+                //     to say that this row definitely terminates in the future
+                //  b) It makes the denotation of a sparse source temporal row simpler, becaues it means that a row sets
+                //     value V on the last known business date then if we just pad forward then V will certainly be padded
+                //     forward to LKBD+1. If we allow toDate >= LKBD when toSourceID == null then padding forward
+                //     by incrementing the LKBD and doing nothing else would *not* pad this data item if e.g. toDate == LKBD+1.
+                //
+                // Condition 2 is not strictly necessary (i.e. we could simply insist that toDate == null || !toDate.isAfter(lastKnownDate(toSourceID-1))
+                // in this case) but we insist on this stronger invariant because it means that in order to interpret the DB we need only know
+                // the LKBD of each ID BB global as of the *maximum source* because the only missing toDates will be those associated with rows
+                // having toSourceID == null. This makes code a little bit simpler and more efficient in a few places.
                 throw new IllegalArgumentException("In order to make interpreting rows in the database simpler and faster " +
                                                    "we maintain the invariant that toDate is only null if toSourceID is null.");
             }
@@ -197,7 +213,7 @@ public class BitemporalSparseLoader {
         public Integer getToSourceID() { return toSourceID; } // Invariant: must not be greater than the maximum source ID
         public V getValue() { return value; }
 
-        // NB: assumes that LKD is a monotonically increasing function of sourceID
+        // NB: relies on the assumption that LKD is a monotonically increasing function of sourceID
         //
         // This is an estimate in that it may return a maximum that is higher than the true value: it is guaranteed
         // to never return one lower than the true value. This can *only* happen when toSourceID < the maximum source ID,
