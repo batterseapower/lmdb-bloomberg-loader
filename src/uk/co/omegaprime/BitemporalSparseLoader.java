@@ -415,7 +415,7 @@ public class BitemporalSparseLoader {
         return a.isAfter(b) ? b : a;
     }
 
-    public static int load(Database db, Transaction tx, LocalDate date, String delivery, InputStream is) throws IOException {
+    public static int load(Database db, Transaction tx, LocalDate date, String delivery, boolean deliveryIsExhaustive, InputStream is) throws IOException {
         final CSVReader reader = new CSVReader(new InputStreamReader(is), '|');
         String[] headers = reader.readNext();
         if (headers == null || headers.length == 1) {
@@ -466,7 +466,7 @@ public class BitemporalSparseLoader {
                 int items = 0;
                 long startTime = System.nanoTime();
 
-                final HashSet<String> seenIdBBGlobals = new HashSet<>();
+                final HashSet<String> seenIdBBGlobals = deliveryIsExhaustive ? new HashSet<>() : null;
                 String[] line;
                 while ((line = reader.readNext()) != null) {
                     if (line.length < headers.length) {
@@ -474,7 +474,7 @@ public class BitemporalSparseLoader {
                     }
 
                     final String idBBGlobal = line[idBBGlobalIx];
-                    seenIdBBGlobals.add(idBBGlobal);
+                    if (seenIdBBGlobals != null) seenIdBBGlobals.add(idBBGlobal);
 
                     final LocalDate itemLastKnownDate = lkdCursors.itemLastKnownDateCursor.moveTo(idBBGlobal) ? lkdCursors.itemLastKnownDateCursor.getValue() : null;
 
@@ -532,8 +532,10 @@ public class BitemporalSparseLoader {
                     }
                 }
 
-                // Kill off any product that we expected to be in this delivery but was not
-                lkdCursors.killAllProductsInDeliveryExcept(delivery, deliveryPriorLastKnownDate, seenIdBBGlobals);
+                if (seenIdBBGlobals != null) {
+                    // Kill off any product that we expected to be in this delivery but was not
+                    lkdCursors.killAllProductsInDeliveryExcept(delivery, deliveryPriorLastKnownDate, seenIdBBGlobals);
+                }
 
                 long duration = System.nanoTime() - startTime;
                 System.out.println("Loaded " + items + " in " + duration + "ns (" + (duration / items) + "ns/item) to source ID " + sourceID);

@@ -53,8 +53,7 @@ public class BitemporalSparseLoaderTest {
         return v;
     }
 
-    @Test
-    public void randomTest() throws IOException {
+    public void randomTest(boolean sourcesAreExhaustive) throws IOException {
         final Random random = new Random();
         final long seed = random.nextLong();
         random.setSeed(seed);
@@ -110,16 +109,18 @@ public class BitemporalSparseLoaderTest {
                             }
                         }
 
-                        for (Map.Entry<String, Pair<String, LocalDate>> lastSeenEntry : new HashSet<>(lastSeenByID.entrySet())) {
-                            if (lastSeenEntry.getValue().k.equals(delivery) && lastSeenEntry.getValue().v.isBefore(date)) {
-                                // Expected in this delivery but didn't show up: it must have been deleted. Don't pad anything forward.
-                                lastSeenByID.remove(lastSeenEntry.getKey());
+                        if (sourcesAreExhaustive) {
+                            for (Map.Entry<String, Pair<String, LocalDate>> lastSeenEntry : new HashSet<>(lastSeenByID.entrySet())) {
+                                if (lastSeenEntry.getValue().k.equals(delivery) && lastSeenEntry.getValue().v.isBefore(date)) {
+                                    // Expected in this delivery but didn't show up: it must have been deleted. Don't pad anything forward.
+                                    lastSeenByID.remove(lastSeenEntry.getKey());
+                                }
                             }
                         }
 
                         System.out.println(delivery + ": " + date);
                         System.out.println(csv.toString());
-                        final int sourceID = BitemporalSparseLoader.load(db, tx, date, delivery, new ByteArrayInputStream(csv.toString().getBytes()));
+                        final int sourceID = BitemporalSparseLoader.load(db, tx, date, delivery, sourcesAreExhaustive, new ByteArrayInputStream(csv.toString().getBytes()));
                         actualBySourceID.put(sourceID, BitemporalSparseLoader.currentSourceToJava(db, tx));
                     }
 
@@ -133,5 +134,15 @@ public class BitemporalSparseLoaderTest {
                 }
             }
         }
+    }
+
+    @Test
+    public void testRandomExhaustiveLoad() throws IOException {
+        randomTest(true);
+    }
+
+    @Test
+    public void testRandomNonExhaustiveLoad() throws IOException {
+        randomTest(false);
     }
 }
