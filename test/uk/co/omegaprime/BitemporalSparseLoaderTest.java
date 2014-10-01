@@ -127,6 +127,8 @@ public class BitemporalSparseLoaderTest {
                         System.out.println(csv.toString());
                         final int sourceID = BitemporalSparseLoader.load(db, tx, date, delivery, sourcesAreExhaustive, new ByteArrayInputStream(csv.toString().getBytes()));
                         actualBySourceID.put(sourceID, BitemporalSparseLoader.currentSourceToJava(db, tx));
+
+                        BitemporalSparseLoader.checkInvariants(db, tx); // Just in case!
                     }
 
                     final Map<String, Map<String, SortedMap<LocalDate, String>>> actual = BitemporalSparseLoader.currentSourceToJava(db, tx);
@@ -149,5 +151,10 @@ public class BitemporalSparseLoaderTest {
     @Test
     public void testRandomNonExhaustiveLoad() throws IOException {
         randomTest(false);
+    }
+
+    @Test
+    public void testCanRollBackToSource() throws IOException {
+        throw new IllegalStateException("FIXME: test this");
     }
 }

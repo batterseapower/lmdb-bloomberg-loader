@@ -187,11 +187,12 @@ public class BitemporalSparseLoader {
                 // In fact, the invariant is more complex than this:
                 //  1. If toSourceID == null, then we expect that toDate == null || !toDate.isAfter(lastKnownDate(maxSourceID))
                 //  2. If toSourceID != null, then we expect that toDate != null && !toDate.isAfter(lastKnownDate(toSourceID-1).plusDays(1))
+                //  3. !fromDate.isAfter(lastKnownDate(toSourceID == null ? maxSourceID : toSourceID-1))
                 //
                 // Condition 1 is necessary for two reasons:
                 //  a) It makes semantic sense: we don't know anything about the future past lastKnownDate, so it doesn't make sense
                 //     to say that this row definitely terminates in the future
-                //  b) It makes the denotation of a sparse source temporal row simpler, becaues it means that a row sets
+                //  b) It makes the denotation of a sparse source temporal row simpler, because it means that a row sets
                 //     value V on the last known business date then if we just pad forward then V will certainly be padded
                 //     forward to LKBD+1. If we allow toDate >= LKBD when toSourceID == null then padding forward
                 //     by incrementing the LKBD and doing nothing else would *not* pad this data item if e.g. toDate == LKBD+1.
@@ -200,6 +201,10 @@ public class BitemporalSparseLoader {
                 // in this case) but we insist on this stronger invariant because it means that in order to interpret the DB we need only know
                 // the LKBD of each ID BB global as of the *maximum source* because the only missing toDates will be those associated with rows
                 // having toSourceID == null. This makes code a little bit simpler and more efficient in a few places.
+                //
+                // Condition 3 is also not strictly necessary (we could just choose to have all DB readers treat such rows as not existing,
+                // since after all the date range they talk about is necessarily past the LKD and hence void) but if we just rule such rows
+                // out then we really don't lose anything, and we reduce complexity.
                 throw new IllegalArgumentException("In order to make interpreting rows in the database simpler and faster " +
                                                    "we maintain the invariant that toDate is only null if toSourceID is null.");
             }
@@ -207,6 +212,17 @@ public class BitemporalSparseLoader {
             this.toDate = toDate;
             this.toSourceID = toSourceID;
             this.value = value;
+        }
+
+        // Sanity checks this tuple given the corresponding key and the LKD associated with the toSourceID
+        // (i.e. the last known date as of toSourceID-1 if toSourceID != null, otherwise the current last known date).
+        public void checkInvariants(TemporalFieldKey key, LocalDate lastKnownDate) {
+            if (toSourceID != null && toSourceID <= key.getSourceID()) throw new IllegalStateException("Source IDs crossed");
+            if (toDate != null && !toDate.isAfter(key.getDate()))      throw new IllegalStateException("Dates crossed");
+
+            if (toSourceID == null && !(toDate == null || !toDate.isAfter(lastKnownDate)))             throw new IllegalStateException("Invariant 1 violation");
+            if (toSourceID != null && !(toDate != null && !toDate.isAfter(lastKnownDate.plusDays(1)))) throw new IllegalStateException("Invariant 2 violation");
+            if (key.getDate().isAfter(lastKnownDate)) throw new IllegalStateException("Invariant 3 violation");
         }
 
         public LocalDate getToDate() { return toDate; }
@@ -608,6 +624,111 @@ public class BitemporalSparseLoader {
 
                 return valuesByField;
             }
+        }
+    }
+
+    public static void checkInvariants(Database db, Transaction tx) {
+        try (final Cursor<Integer, Source> sourcesCursor = createSourcesCursor(db, tx);
+             final Cursor<String, Void> fieldsCursor = createFieldsCursor(db, tx)) {
+            final int maxSourceId = sourcesCursor.moveLast() ? sourcesCursor.getKey() : -1;
+            try (final LKDCursors lkdCursors = new LKDCursors(db, tx, maxSourceId)) {
+                if (fieldsCursor.moveFirst()) {
+                    do {
+                        final String field = fieldsCursor.getKey();
+
+                        try (final Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> fieldCursor = createFieldCursor(db, tx, field)) {
+                            if (fieldCursor.moveFirst()) {
+                                do {
+                                    // FIXME: exploit the fact that we are grouped by id bb unique to reduce LKD lookups
+                                    final TemporalFieldKey fieldKey = fieldCursor.getKey();
+                                    final String idBBGlobal = fieldKey.getIDBBGlobal();
+
+                                    final LocalDate lkd = lkdCursors.lastKnownDate(idBBGlobal);
+                                    fieldCursor.getValue().checkInvariants(fieldKey, lkd);
+                                } while (fieldCursor.moveNext());
+                            }
+                        }
+                    } while (fieldsCursor.moveNext());
+                }
+            }
+        }
+    }
+
+    public static void rollBackToSource(Database db, Transaction tx, int sourceID) {
+        try (final Cursor<Integer, Source> sourcesCursor = createSourcesCursor(db, tx);
+             final Cursor<String, Void> fieldsCursor = createFieldsCursor(db, tx)) {
+            try (final LKDCursors lkdCursors = new LKDCursors(db, tx, sourceID)) {
+                if (fieldsCursor.moveFirst()) {
+                    do {
+                        final String field = fieldsCursor.getKey();
+
+                        try (final Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> fieldCursor = createFieldCursor(db, tx, field)) {
+                            if (fieldCursor.moveFirst()) {
+                                boolean shouldContinue;
+                                do {
+                                    final TemporalFieldKey fieldKey = fieldCursor.getKey();
+                                    final SparseTemporalFieldValue<String> fieldValue = fieldCursor.getValue();
+                                    if (fieldKey.getSourceID() > sourceID) {
+                                        fieldCursor.delete();
+                                        shouldContinue = fieldCursor.isPositioned();
+                                        continue;
+                                    }
+
+                                    if (fieldValue.getToSourceID() != null && fieldValue.getToSourceID() <= sourceID) {
+                                        shouldContinue = fieldCursor.moveNext();
+                                        continue;
+                                    }
+
+                                    // If we reach here then it looks like we certainly need to set ToSourceID = NULL (if it
+                                    // isn't already) so we don't violate SparseTemporalFieldValue invariant 2
+
+                                    // FIXME: exploit the fact that we are grouped by id bb unique to reduce LKD lookups
+                                    final LocalDate lkd = lkdCursors.lastKnownDate(fieldKey.getIDBBGlobal());
+                                    if (fieldKey.getDate().isAfter(lkd)) {
+                                        // Enforce SparseTemporalFieldValue invariant 3
+                                        fieldCursor.delete();
+                                        shouldContinue = fieldCursor.isPositioned();
+                                        continue;
+                                    }
+
+                                    // In this case either:
+                                    //   a) ToSourceID is null, so all we need to do is maybe null out the ToDate (for SparseTemporalFieldValue invariant 1)
+                                    //   b) ToSourceID > sourceID, so we definitely need to null out ToSourceID and may need to null out the ToDate
+                                    final boolean truncateToDate = fieldValue.getToDate() != null && fieldValue.getToDate().isAfter(lkd);
+                                    if (truncateToDate || fieldValue.getToSourceID() != null) {
+                                        fieldCursor.put(new SparseTemporalFieldValue<>(truncateToDate ? null : fieldValue.getToDate(), null, fieldValue.getValue()));
+                                    }
+                                    shouldContinue = fieldCursor.moveNext();
+                                } while (shouldContinue);
+                            }
+                        }
+                    } while (fieldsCursor.moveNext());
+                }
+
+                truncateSparseSourceTemporalCursor(lkdCursors.deliveryLastKnownDateCursor, sourceID);
+                truncateSparseSourceTemporalCursor(lkdCursors.lastKnownDeliveryCursor,     sourceID);
+                truncateSparseSourceTemporalCursor(lkdCursors.itemLastKnownDateCursor,     sourceID);
+            }
+
+            if (sourcesCursor.moveFloor(sourceID) && sourcesCursor.moveNext()) {
+                do {
+                    sourcesCursor.delete();
+                } while (sourcesCursor.isPositioned());
+            }
+        }
+    }
+
+    private static <T> void truncateSparseSourceTemporalCursor(SparseSourceTemporalCursor<T> cursor, int sourceID) {
+        if (cursor.cursor.moveFirst()) {
+            do {
+                final SourceTemporalFieldKey fieldKey = cursor.cursor.getKey();
+                final SparseSourceTemporalFieldValue<T> fieldValue = cursor.cursor.getValue();
+                if (fieldKey.getSourceID() > sourceID) {
+                    cursor.cursor.delete();
+                } else if (fieldKey.getSourceID() <= sourceID && (fieldValue.getToSourceID() == null || fieldValue.getToSourceID() > sourceID)) {
+                    cursor.cursor.put(new SparseSourceTemporalFieldValue<>(null, fieldValue.getValue()));
+                }
+            } while (cursor.cursor.moveNext());
         }
     }
 }
