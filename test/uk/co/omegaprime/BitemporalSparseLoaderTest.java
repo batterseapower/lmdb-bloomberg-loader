@@ -208,15 +208,14 @@ public class BitemporalSparseLoaderTest {
         randomTest(false);
     }
 
-    @Test
-    public void testCanRollBackToSource() throws IOException {
+    public void testCanRollBackToSource(boolean sourcesAreExhaustive) throws IOException {
         final Random random = getRandom();
 
         for (int i = 0; i < 100; i++) {
             try (Database db = createDatabase();
                  Transaction tx = db.transaction(false)) {
 
-                final List<LoadableSource> sources = createRandomSources(false, random);
+                final List<LoadableSource> sources = createRandomSources(sourcesAreExhaustive, random);
                 final SortedMap<Integer, Map<String, Map<String, SortedMap<LocalDate, String>>>> actualBySourceID = loadRandomSources(db, tx, sources);
 
                 // Make sure we can roll back to a prior source and then load the same suffix of sources to get back to exactly the same place
@@ -240,5 +239,15 @@ public class BitemporalSparseLoaderTest {
                 }
             }
         }
+    }
+
+    @Test
+    public void testCanRollBackToSourceExhaustiveLoad() throws IOException {
+        testCanRollBackToSource(true);
+    }
+
+    @Test
+    public void testCanRollBackToSourceNonExhaustiveLoad() throws IOException {
+        testCanRollBackToSource(false);
     }
 }
