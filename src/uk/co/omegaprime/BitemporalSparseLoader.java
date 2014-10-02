@@ -370,10 +370,10 @@ public class BitemporalSparseLoader {
         final SparseSourceTemporalCursor<LocalDate> itemLastKnownDateCursor;
         final SparseSourceTemporalCursor<LocalDate> deliveryLastKnownDateCursor;
 
-        public LKDCursors(Database db, Transaction tx, int sourceID) {
-            this.lastKnownDeliveryCursor     = new SparseSourceTemporalCursor<>(db.createIndex(tx, "LastKnownDelivery",     SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(new Latin1StringSchema(10))).createCursor(tx), sourceID);
-            this.itemLastKnownDateCursor     = new SparseSourceTemporalCursor<>(db.createIndex(tx, "ItemLastKnownDate",     SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)  ).createCursor(tx), sourceID);
-            this.deliveryLastKnownDateCursor = new SparseSourceTemporalCursor<>(db.createIndex(tx, "DeliveryLastKnownDate", SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)  ).createCursor(tx), sourceID); // Actually keyed by delivery, not ID_BB_GLOBAL
+        public LKDCursors(Environment db, Transaction tx, int sourceID) {
+            this.lastKnownDeliveryCursor     = new SparseSourceTemporalCursor<>(db.createDatabase(tx, "LastKnownDelivery", SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(new Latin1StringSchema(10))).createCursor(tx), sourceID);
+            this.itemLastKnownDateCursor     = new SparseSourceTemporalCursor<>(db.createDatabase(tx, "ItemLastKnownDate", SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)).createCursor(tx), sourceID);
+            this.deliveryLastKnownDateCursor = new SparseSourceTemporalCursor<>(db.createDatabase(tx, "DeliveryLastKnownDate", SourceTemporalFieldKey.SCHEMA, SparseSourceTemporalFieldValue.schema(LocalDateSchema.INSTANCE)).createCursor(tx), sourceID); // Actually keyed by delivery, not ID_BB_GLOBAL
         }
 
         public LocalDate lastKnownDate(String idBBGlobal) {
@@ -431,7 +431,7 @@ public class BitemporalSparseLoader {
         return a.isAfter(b) ? b : a;
     }
 
-    public static int load(Database db, Transaction tx, LocalDate date, String delivery, boolean deliveryIsExhaustive, InputStream is) throws IOException {
+    public static int load(Environment db, Transaction tx, LocalDate date, String delivery, boolean deliveryIsExhaustive, InputStream is) throws IOException {
         final CSVReader reader = new CSVReader(new InputStreamReader(is), '|');
         String[] headers = reader.readNext();
         if (headers == null || headers.length == 1) {
@@ -469,9 +469,9 @@ public class BitemporalSparseLoader {
                     if (headers[i].equals("ID_BB_GLOBAL")) {
                         idBBGlobalIx = i;
                     } else {
-                        final String indexName = headers[i].replace(" ", "");
-                        if (!fieldsCursor.moveTo(indexName)) fieldsCursor.put(indexName, null);
-                        cursors[i] = new SparseTemporalCursor<>(createFieldCursor(db, tx, indexName), sourceID);
+                        final String dbName = headers[i].replace(" ", "");
+                        if (!fieldsCursor.moveTo(dbName)) fieldsCursor.put(dbName, null);
+                        cursors[i] = new SparseTemporalCursor<>(createFieldCursor(db, tx, dbName), sourceID);
                     }
                 }
 
@@ -561,23 +561,23 @@ public class BitemporalSparseLoader {
         }
     }
 
-    private static Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> createFieldCursor(Database db, Transaction tx, String indexName) {
-        return db.createIndex(tx, indexName, TemporalFieldKey.SCHEMA, SparseTemporalFieldValue.schema(new Latin1StringSchema(64))).createCursor(tx);
+    private static Cursor<TemporalFieldKey, SparseTemporalFieldValue<String>> createFieldCursor(Environment db, Transaction tx, String dbName) {
+        return db.createDatabase(tx, dbName, TemporalFieldKey.SCHEMA, SparseTemporalFieldValue.schema(new Latin1StringSchema(64))).createCursor(tx);
     }
 
-    private static Cursor<String, Void> createFieldsCursor(Database db, Transaction tx) {
-        return db.createIndex(tx, "Fields", Latin1StringSchema.INSTANCE, VoidSchema.INSTANCE).createCursor(tx);
+    private static Cursor<String, Void> createFieldsCursor(Environment db, Transaction tx) {
+        return db.createDatabase(tx, "Fields", Latin1StringSchema.INSTANCE, VoidSchema.INSTANCE).createCursor(tx);
     }
 
-    private static Cursor<Integer, Source> createSourcesCursor(Database db, Transaction tx) {
-        return db.createIndex(tx, "Source", IntegerSchema.INSTANCE, Source.SCHEMA).createCursor(tx);
+    private static Cursor<Integer, Source> createSourcesCursor(Environment db, Transaction tx) {
+        return db.createDatabase(tx, "Source", IntegerSchema.INSTANCE, Source.SCHEMA).createCursor(tx);
     }
 
-    public static Map<String, Map<String, SortedMap<LocalDate, String>>> currentSourceToJava(Database db, Transaction tx) {
+    public static Map<String, Map<String, SortedMap<LocalDate, String>>> currentSourceToJava(Environment db, Transaction tx) {
         return sourceToJava(db, tx, null);
     }
 
-    public static Map<String, Map<String, SortedMap<LocalDate, String>>> sourceToJava(Database db, Transaction tx, Integer sourceID) {
+    public static Map<String, Map<String, SortedMap<LocalDate, String>>> sourceToJava(Environment db, Transaction tx, Integer sourceID) {
         final HashMap<String, Map<String, SortedMap<LocalDate, String>>> valuesByField = new HashMap<>();
 
         try (final Cursor<Integer, Source> sourcesCursor = createSourcesCursor(db, tx);
@@ -627,7 +627,7 @@ public class BitemporalSparseLoader {
         }
     }
 
-    public static void checkInvariants(Database db, Transaction tx) {
+    public static void checkInvariants(Environment db, Transaction tx) {
         try (final Cursor<Integer, Source> sourcesCursor = createSourcesCursor(db, tx);
              final Cursor<String, Void> fieldsCursor = createFieldsCursor(db, tx)) {
             final int maxSourceId = sourcesCursor.moveLast() ? sourcesCursor.getKey() : -1;
@@ -654,7 +654,7 @@ public class BitemporalSparseLoader {
         }
     }
 
-    public static void rollBackToSource(Database db, Transaction tx, int sourceID) {
+    public static void rollBackToSource(Environment db, Transaction tx, int sourceID) {
         try (final Cursor<Integer, Source> sourcesCursor = createSourcesCursor(db, tx);
              final Cursor<String, Void> fieldsCursor = createFieldsCursor(db, tx)) {
             try (final LKDCursors lkdCursors = new LKDCursors(db, tx, sourceID)) {

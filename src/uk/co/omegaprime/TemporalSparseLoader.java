@@ -2,8 +2,8 @@ package uk.co.omegaprime;
 
 import au.com.bytecode.opencsv.CSVReader;
 import uk.co.omegaprime.thunder.Cursor;
+import uk.co.omegaprime.thunder.Environment;
 import uk.co.omegaprime.thunder.Database;
-import uk.co.omegaprime.thunder.Index;
 import uk.co.omegaprime.thunder.Transaction;
 import uk.co.omegaprime.thunder.schema.Latin1StringSchema;
 import uk.co.omegaprime.thunder.schema.LocalDateSchema;
@@ -35,7 +35,7 @@ public class TemporalSparseLoader {
         public FieldValue setToDate(LocalDate toDate) { return new FieldValue(value, toDate); }
     }
 
-    public static void load(Database db, Transaction tx, LocalDate date, ZipInputStream zis) throws IOException {
+    public static void load(Environment db, Transaction tx, LocalDate date, ZipInputStream zis) throws IOException {
         final CSVReader reader = new CSVReader(new InputStreamReader(zis), '|');
         String[] headers = reader.readNext();
         if (headers == null || headers.length == 1) {
@@ -49,9 +49,9 @@ public class TemporalSparseLoader {
             if (headers[i].equals("ID_BB_GLOBAL")) {
                 idBBGlobalIx = i;
             } else {
-                final String indexName = headers[i].replace(" ", "");
-                final Index<FieldKey, FieldValue> index = db.createIndex(tx, indexName, FieldKey.SCHEMA, FieldValue.SCHEMA);
-                cursors[i] = index.createCursor(tx);
+                final String dbName = headers[i].replace(" ", "");
+                final Database<FieldKey, FieldValue> database = db.createDatabase(tx, dbName, FieldKey.SCHEMA, FieldValue.SCHEMA);
+                cursors[i] = database.createCursor(tx);
             }
         }
 

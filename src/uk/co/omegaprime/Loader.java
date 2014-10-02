@@ -1,6 +1,5 @@
 package uk.co.omegaprime;
 
-import au.com.bytecode.opencsv.CSVReader;
 import uk.co.omegaprime.thunder.*;
 import uk.co.omegaprime.thunder.schema.*;
 
@@ -102,16 +101,16 @@ public class Loader {
         }
         dbDirectory.mkdir();
 
-        try (final Database db = new Database(dbDirectory, new DatabaseOptions().maxIndexes(40).mapSize(1024*1024*1024))) {
+        try (final Environment db = new Environment(dbDirectory, new EnvironmentOptions().maxDatabases(40).mapSize(1024*1024*1024))) {
             try (final Transaction tx = db.transaction(false)) {
-                final Index<File, Source> sourcesIndex = db.<File, Source>createIndex(tx, "Sources", StringSchema.INSTANCE.map(File::getAbsolutePath, File::new),
-                                                                                                     InstantSchema.INSTANCE_SECOND_RESOLUTION.map(Source::getInstant, Source::new));
+                final Database<File, Source> sourcesDatabase = db.<File, Source>createDatabase(tx, "Sources", StringSchema.INSTANCE.map(File::getAbsolutePath, File::new),
+                        InstantSchema.INSTANCE_SECOND_RESOLUTION.map(Source::getInstant, Source::new));
                 final Iterator<File> it = availableFiles(new File("/Users/mbolingbroke/Downloads"));
                 while (it.hasNext()) {
                     final File file = it.next();
-                    if (!sourcesIndex.contains(tx, file)) {
+                    if (!sourcesDatabase.contains(tx, file)) {
                         loadZip(db, tx, file);
-                        sourcesIndex.put(tx, file, new Source(Instant.now()));
+                        sourcesDatabase.put(tx, file, new Source(Instant.now()));
                     }
                 }
 
@@ -123,7 +122,7 @@ public class Loader {
     final static Pattern FILENAME_REGEX = Pattern.compile("Equity_Common_Stock_([0-9]+)[.]txt[.]zip");
     final static DateTimeFormatter FILENAME_DTF = DateTimeFormatter.ofPattern("yyyyMMdd");
 
-    public static void loadZip(Database db, Transaction tx, File file) throws IOException {
+    public static void loadZip(Environment db, Transaction tx, File file) throws IOException {
         final Matcher m = FILENAME_REGEX.matcher(file.getName());
         if (!m.matches()) throw new IllegalStateException("Supplied file name " + file.getName() + " did not match expected pattern");
 
